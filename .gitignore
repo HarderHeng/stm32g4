@@ -1,0 +1,23 @@
+# Target directory
+/target
+
+# Examples directory
+/examples
+
+# Claude Code
+/.claude
+
+# IDE
+/.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.bin
+*.elf
+*.hex
+*.map
