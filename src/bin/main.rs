@@ -20,8 +20,14 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::task]
 async fn shell_task(mut rx: UartRx<'static, Async>) {
+    // Small delay to let UART settle after initialization
+    embassy_time::Timer::after_millis(10).await;
+
+    // Clear any pending data in RX buffer to avoid frame errors on startup
+    let mut discard = [0u8; 16];
+    let _ = rx.read(&mut discard).await;
+
     // Create shell with the initialized TX
-    // Note: TX must be initialized in main before spawning this task
     let writer = ShellWriter::new(get_shell_tx());
     let mut shell = Shell::new(writer);
 
@@ -31,7 +37,10 @@ async fn shell_task(mut rx: UartRx<'static, Async>) {
     loop {
         match rx.read(&mut buf).await {
             Ok(()) => shell.process(buf[0]),
-            Err(e) => error!("RX error: {:?}", e),
+            Err(e) => {
+                // Log error but continue (don't let frame error crash the shell)
+                warn!("RX error: {:?}", e);
+            }
         }
     }
 }
