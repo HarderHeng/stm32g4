@@ -165,6 +165,16 @@ panic = "abort"      # 不展开 panic
 - `heapless`
 - `critical-section`
 
+**已移除未使用的模块：**
+- `driver/serial.rs` (未使用的 re-exports)
+
+**embedded-cli 功能大小参考：**
+| 功能 | Flash 影响 |
+|------|-----------|
+| help | +2.2KB |
+| history | +1KB |
+| autocomplete | 包含在 macros 中 |
+
 ## 依赖版本
 
 | 库 | 版本 |
