@@ -2,47 +2,56 @@
 
 ## 项目概述
 
-基于 Embassy 异步运行时的 STM32G4 UART Shell 实现，支持 DMA 传输和交互式命令行。
+基于 Embassy 异步运行时的 STM32G4 UART Shell 实现，使用 embedded-cli 库提供交互式命令行界面。
 
 ## 遇到的问题与解决方案
 
-### 1. Flash 空间溢出
+### 1. UART RX Frame Error
 
 **问题描述：**
-Debug 模式下编译后代码大小超过 STM32G431CB 的 128KB Flash，导致链接错误：
-```
-rust-lld: error: section '.rodata' will not fit in region 'FLASH': overflowed by 3344 bytes
-```
+上电后首次连接终端时触发 RX frame error。
 
 **原因分析：**
-- 使用 `heapless::String<CMD_MAX_LEN>` 等泛型类型会产生大量代码实例化
-- 复杂的 escape sequence 解析逻辑
-- 大量字符串常量
+- UART 初始化时序问题
+- 终端连接时的电气噪声
+- 缓冲区配置导致的偶发问题
 
 **解决方案：**
-- 使用原生 `[u8; N]` 数组替代 `heapless::String`
-- 简化状态机，移除复杂的 escape sequence 处理
-- 减少字符串常量，使用简短的提示信息
+实现错误处理机制，区分瞬态错误和持续错误：
+```rust
+let mut error_count: u8 = 0;
+let startup_grace_period = embassy_time::Instant::now();
 
-**优化效果：**
-| 模式 | 优化前 | 优化后 |
-|------|--------|--------|
-| Debug | 溢出 (131KB+) | 108KB |
-| Release | 42KB | 28KB |
+match rx.read(&mut buf).await {
+    Ok(()) => {
+        error_count = 0;
+        shell.process(buf[0]);
+    }
+    Err(e) => {
+        error_count = error_count.saturating_add(1);
+        let elapsed_ms = startup_grace_period.elapsed().as_millis();
+        if elapsed_ms > 100 || error_count > 3 {
+            error!("RX error: {:?} (count: {})", e, error_count);
+        }
+    }
+}
+```
 
-### 2. DMA 中断绑定名称错误
+**处理策略：**
+- 启动宽限期：前 100ms 内的偶发错误不报告
+- 错误计数：允许最多 3 次错误
+- 成功读取后重置计数
+- 持续错误通过 `error!` 报告
+
+### 2. DMA 中断绑定名称
 
 **问题描述：**
 ```rust
-bind_interrupts!(struct Irqs {
-    DMA1_CH0 => dma::InterruptHandler<peripherals::DMA1_CH0>;  // 错误
-});
+DMA1_CH0 => dma::InterruptHandler<peripherals::DMA1_CH0>;  // 错误
 ```
 
-**原因：**
-STM32G4 系列的 DMA 中断在 Embassy 中命名为 `DMA1_CHANNEL1` 而非 `DMA1_CH1`。
-
 **解决方案：**
+STM32G4 系列的 DMA 中断命名为 `DMA1_CHANNEL1`：
 ```rust
 bind_interrupts!(struct Irqs {
     USART2 => usart::InterruptHandler<peripherals::USART2>;
@@ -51,48 +60,23 @@ bind_interrupts!(struct Irqs {
 });
 ```
 
-### 3. Embassy Executor Spawn Token
+### 3. embedded-io 版本冲突
 
 **问题描述：**
-```rust
-spawner.spawn(shell_task(tx, rx)).ok();  // 错误
-```
-
-**原因：**
-`#[embassy_executor::task]` 宏生成的函数返回 `Result<SpawnToken<_>, SpawnError>`，需要 unwrap。
+`embedded-cli` 使用 `embedded-io` 0.7.x，但部分依赖仍使用 0.6.x。
 
 **解决方案：**
+使用 `StaticCell` 存储 UART TX，避免泛型类型跨越版本边界：
 ```rust
-spawner.spawn(unwrap!(shell_task(tx, rx)));
-```
+pub static SHELL_TX: StaticCell<UartTx<'static, Async>> = StaticCell::new();
 
-### 4. embedded-io Write Trait 返回值
-
-**问题描述：**
-```rust
-tx.write(b"data").await?;  // 返回 Result<usize, E>
-```
-
-**原因：**
-`embedded_io::Write::write()` 返回 `Result<usize, E>`，不是 `Result<(), E>`。
-
-**解决方案：**
-```rust
-// 方案1: 使用分号忽略返回值
-tx.write(b"data").await?;
-Ok(())
-
-// 方案2: 使用块表达式
-match args {
-    b"on" => { tx.write(b"LED ON\r\n").await?; }
-    _ => { tx.write(b"Usage: led on|off|toggle\r\n").await?; }
+pub fn init_shell_tx(tx: UartTx<'static, Async>) {
+    let tx_ref = SHELL_TX.init(tx);
+    // ...
 }
 ```
 
-### 5. Uart::new 参数顺序
-
-**问题描述：**
-参数顺序错误导致编译失败。
+### 4. Uart::new 参数顺序
 
 **正确的参数顺序：**
 ```rust
@@ -119,6 +103,17 @@ Uart::new(
   - DMA: TX=DMA1_CH2, RX=DMA1_CH1
 - Clock: 170MHz (HSE 8MHz + PLL)
 
+## Shell 特性
+
+基于 embedded-cli 库：
+
+| 特性 | 说明 |
+|------|------|
+| Tab 补全 | 自动补全命令 |
+| 历史记录 | 上/下键浏览历史 |
+| 帮助系统 | `help` 命令 |
+| 光标移动 | 左/右键移动光标 |
+
 ## 可用命令
 
 | 命令 | 说明 |
@@ -137,21 +132,19 @@ Uart::new(
 # Debug 模式运行
 cargo run
 
-# Release 模式运行 (更小体积)
+# Release 模式运行
 cargo run --release
 
-# 查看代码大小
-cargo size
-cargo size --release
-
-# 分析代码体积
-cargo bloat --release
+# 终端连接
+tio /dev/ttyUSB0 -b 921600
 ```
 
 ## 依赖版本
 
-- embassy-stm32: 0.6.0
-- embassy-executor: 0.10.0
-- embassy-time: 0.5.1
-- defmt: 1.0.1
-- heapless: 0.9
+| 库 | 版本 |
+|---|---|
+| embassy-stm32 | 0.6.0 |
+| embassy-executor | 0.10.0 |
+| embassy-time | 0.5.1 |
+| embedded-cli | 0.2.1 (git) |
+| defmt | 1.0.1 |
