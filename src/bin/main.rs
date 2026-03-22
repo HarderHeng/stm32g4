@@ -26,13 +26,28 @@ async fn shell_task(mut rx: UartRx<'static, Async>) {
 
     shell.print_welcome();
 
+    // Error tracking: ignore occasional errors during startup
+    // but report if errors persist after initial period
+    let mut error_count: u8 = 0;
+    let startup_grace_period = embassy_time::Instant::now();
+
     let mut buf = [0u8; 1];
     loop {
         match rx.read(&mut buf).await {
-            Ok(()) => shell.process(buf[0]),
-            Err(_) => {
-                // Ignore RX errors (frame error, overrun, etc.)
-                // These can occur during startup or connection
+            Ok(()) => {
+                // Reset error count on successful read
+                error_count = 0;
+                shell.process(buf[0]);
+            }
+            Err(e) => {
+                error_count = error_count.saturating_add(1);
+
+                // Allow a few errors during startup grace period (first 100ms)
+                // Otherwise report persistent errors
+                let elapsed_ms = startup_grace_period.elapsed().as_millis();
+                if elapsed_ms > 100 || error_count > 3 {
+                    error!("RX error: {:?} (count: {})", e, error_count);
+                }
             }
         }
     }
