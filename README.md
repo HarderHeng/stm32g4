@@ -82,7 +82,7 @@ Clock: 170MHz
 - UART: USART2
   - TX: PB3
   - RX: PB4
-  - Baud: 115200
+  - Baud: 921600
   - DMA: TX=DMA1_CH2, RX=DMA1_CH1
 - Clock: 170MHz (HSE 8MHz + PLL)
 
@@ -108,17 +108,17 @@ cargo size --release
 
 ```bash
 # 使用 tio
-tio /dev/ttyUSB0
+tio /dev/ttyUSB0 -b 921600
 
 # 使用 minicom
-minicom -D /dev/ttyUSB0
+minicom -D /dev/ttyUSB0 -b 921600
 
 # 使用 picocom
-picocom /dev/ttyUSB0 -b 115200
+picocom /dev/ttyUSB0 -b 921600
 ```
 
 确保终端配置为：
-- 波特率: 115200
+- 波特率: 921600
 - 数据位: 8
 - 停止位: 1
 - 无校验

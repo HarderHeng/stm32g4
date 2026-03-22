@@ -6,7 +6,7 @@
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::{bind_interrupts, dma, peripherals, usart};
-use embassy_stm32::usart::{Uart, UartRx};
+use embassy_stm32::usart::{Uart, UartRx, Config};
 use embassy_stm32::mode::Async;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -51,7 +51,11 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32g4_foc::bsp::init();
     info!("STM32G4 Shell (embedded-cli)");
 
-    let uart = Uart::new(p.USART2, p.PB4, p.PB3, p.DMA1_CH2, p.DMA1_CH1, Irqs, Default::default())
+    // Configure UART with 921600 baud rate
+    let mut config = Config::default();
+    config.baudrate = 921600;
+
+    let uart = Uart::new(p.USART2, p.PB4, p.PB3, p.DMA1_CH2, p.DMA1_CH1, Irqs, config)
         .expect("UART");
     let (tx, rx) = uart.split();
 

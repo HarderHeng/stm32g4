@@ -115,7 +115,7 @@ Uart::new(
 - UART: USART2
   - TX: PB3
   - RX: PB4
-  - Baud: 115200
+  - Baud: 921600
   - DMA: TX=DMA1_CH2, RX=DMA1_CH1
 - Clock: 170MHz (HSE 8MHz + PLL)
 
