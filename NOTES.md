@@ -139,6 +139,32 @@ cargo run --release
 tio /dev/ttyUSB0 -b 921600
 ```
 
+## 编译优化
+
+Release 配置已优化以减少 Flash/RAM 占用：
+
+```toml
+[profile.release]
+opt-level = "z"      # 优化代码大小
+lto = "fat"          # 链接时优化
+codegen-units = 1    # 单代码生成单元
+panic = "abort"      # 不展开 panic
+```
+
+**优化效果：**
+| 指标 | 优化前 | 优化后 |
+|------|--------|--------|
+| Flash | 44KB | 27KB |
+| RAM | 1.9KB | 1.7KB |
+
+**已移除未使用的依赖：**
+- `embassy-embedded-hal`
+- `usbd-hid`
+- `embedded-hal`
+- `embedded-io-async`
+- `heapless`
+- `critical-section`
+
 ## 依赖版本
 
 | 库 | 版本 |

@@ -158,7 +158,7 @@ impl ufmt::uWrite for ShellWriter {
 
 /// Shell wrapper using embedded-cli
 pub struct Shell {
-    cli: Cli<ShellWriter, Infallible, [u8; 128], [u8; 128]>,
+    cli: Cli<ShellWriter, Infallible, [u8; 64], [u8; 64]>,
 }
 
 impl Shell {
@@ -167,8 +167,8 @@ impl Shell {
         let cli = CliBuilder::default()
             .writer(writer)
             .prompt("G431> ")
-            .command_buffer([0u8; 128])
-            .history_buffer([0u8; 128])
+            .command_buffer([0u8; 64])
+            .history_buffer([0u8; 64])
             .build()
             .expect("CLI build");
         Self { cli }
