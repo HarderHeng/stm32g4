@@ -26,11 +26,24 @@ pub enum LedCommand {
     Toggle,
 }
 
+/// Motor subcommands (placeholder for future implementation)
+#[derive(Command)]
+pub enum MotorCommand {
+    /// Show motor status
+    Status,
+    /// Start motor
+    Start,
+    /// Stop motor
+    Stop,
+}
+
 /// System subcommands
 #[derive(Command)]
 pub enum SystemCommand {
     /// Show system info
     Info,
+    /// Request OTA update (reboot to bootloader)
+    Ota,
 }
 
 /// All commands
@@ -55,6 +68,11 @@ pub enum Command<'a> {
         #[command(subcommand)]
         command: LedCommand,
     },
+    /// Motor control
+    Motor {
+        #[command(subcommand)]
+        command: MotorCommand,
+    },
     /// System commands
     System {
         #[command(subcommand)]
@@ -73,15 +91,24 @@ where
             uwrite!(writer, "Hello, {}!\r\n", name.unwrap_or("World"))
         }
         Command::Clear => writer.write_str("\x1b[2J\x1b[H"),
-        Command::Version => writer.write_str("STM32G4 Shell v0.4.0\r\n"),
+        Command::Version => writer.write_str("STM32G4 FOC v0.6.0\r\n"),
         Command::Echo { text } => uwrite!(writer, "{}\r\n", text.unwrap_or("")),
         Command::Led { command } => match command {
             LedCommand::On => writer.write_str("LED ON\r\n"),
             LedCommand::Off => writer.write_str("LED OFF\r\n"),
             LedCommand::Toggle => writer.write_str("LED TOGGLE\r\n"),
         },
+        Command::Motor { command } => match command {
+            MotorCommand::Status => writer.write_str("Motor: initialized (FOC ready)\r\nPWM: 20kHz\r\nADC: dual mode\r\n"),
+            MotorCommand::Start => writer.write_str("Motor start (not implemented)\r\n"),
+            MotorCommand::Stop => writer.write_str("Motor stop (not implemented)\r\n"),
+        },
         Command::System { command } => match command {
-            SystemCommand::Info => writer.write_str("MCU: STM32G431CB\r\nClock: 170MHz\r\n"),
+            SystemCommand::Info => writer.write_str("MCU: STM32G431CB\r\nClock: 170MHz\r\nFOC: enabled\r\nBootloader: v1.0\r\n"),
+            SystemCommand::Ota => {
+                // TODO: Implement OTA trigger after bootloader is ready
+                writer.write_str("OTA mode not implemented yet\r\n")
+            }
         },
     };
 }
@@ -193,7 +220,7 @@ impl Shell {
     /// Print welcome message
     pub fn print_welcome(&mut self) {
         let _ = self.cli.write(|writer| {
-            writer.write_str("STM32G4 Shell v0.4.0\r\n")?;
+            writer.write_str("STM32G4 FOC v0.6.0\r\n")?;
             writer.write_str("Type 'help' for commands\r\n")
         });
     }

@@ -1,4 +1,10 @@
-//! Embassy STM32G4 Demo - Shell over UART with DMA using embedded-cli
+//! Embassy STM32G4 FOC Demo - Motor control peripheral initialization
+//!
+//! This demo initializes:
+//! - UART Shell (USART2)
+//! - OPAMP for current sensing (OPAMP1, 2, 3)
+//! - PWM for motor control (TIM1, 6-channel complementary)
+//! - ADC for current sampling (ADC1, ADC2 dual mode)
 
 #![no_std]
 #![no_main]
@@ -11,6 +17,10 @@ use embassy_stm32::mode::Async;
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_stm32g4_foc::driver::{init_shell_tx, get_shell_tx, ShellWriter, Shell};
+use embassy_stm32g4_foc::driver::{MotorPwm, CurrentSenseAmp, CurrentSenseAdc};
+
+/// APP start address (after bootloader 16KB + boot flag 2KB)
+const APP_START: u32 = 0x0800_8800;
 
 bind_interrupts!(struct Irqs {
     USART2 => usart::InterruptHandler<peripherals::USART2>;
@@ -65,10 +75,15 @@ async fn heartbeat() {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_stm32g4_foc::bsp::init();
-    info!("STM32G4 Shell (embedded-cli)");
+    // Set VTOR to APP address (required when running from bootloader)
+    unsafe {
+        (*cortex_m::peripheral::SCB::PTR).vtor.write(APP_START);
+    }
 
-    // Configure UART with 921600 baud rate
+    let p = embassy_stm32g4_foc::bsp::init();
+    info!("STM32G4 FOC Peripheral Init");
+
+    // 1. Configure UART with 921600 baud rate
     let mut config = Config::default();
     config.baudrate = 921600;
 
@@ -79,6 +94,36 @@ async fn main(spawner: Spawner) {
     // Initialize TX storage before spawning shell task
     init_shell_tx(tx);
 
+    // 2. Initialize OPAMP for current sensing (must be before ADC)
+    // OPAMP internal outputs are connected to ADC channels:
+    // - OPAMP1 (PA1) -> ADC1_CH13 (U phase)
+    // - OPAMP2 (PA7) -> ADC2_CH16 (V phase)
+    // - OPAMP3 (PB0) -> ADC2_CH18 (W phase)
+    let _opamp = CurrentSenseAmp::new(
+        p.OPAMP1, p.OPAMP2, p.OPAMP3,
+        p.PA1, p.PA7, p.PB0,
+    );
+    info!("OPAMP initialized (gain: {})", CurrentSenseAmp::gain());
+
+    // 3. Initialize PWM for motor control
+    // TIM1 generates 6-channel complementary PWM at 20kHz
+    // Dead time is set to 800ns for L6387E gate driver
+    let _pwm = MotorPwm::new(
+        p.TIM1,
+        p.PA8, p.PC13,   // CH1 (U phase): PA8 high-side, PC13 low-side
+        p.PA9, p.PA12,   // CH2 (V phase): PA9 high-side, PA12 low-side
+        p.PA10, p.PB15,  // CH3 (W phase): PA10 high-side, PB15 low-side
+    );
+    info!("PWM initialized (20kHz, 800ns dead time)");
+
+    // 4. Initialize ADC for current sampling
+    // ADC1 and ADC2 in dual injected mode for synchronized sampling
+    let _adc = CurrentSenseAdc::new(p.ADC1, p.ADC2);
+    info!("ADC initialized (dual injected mode)");
+
+    info!("All peripherals initialized successfully");
+
+    // Spawn tasks
     spawner.spawn(unwrap!(shell_task(rx)));
     spawner.spawn(unwrap!(heartbeat()));
 }
