@@ -37,6 +37,12 @@ impl Default for BoardConfig {
         // Select PLL as system clock
         config.rcc.sys = Sysclk::PLL1_R;
 
+        // Configure APB prescalers
+        // STM32G4 specs: APB1 max 85MHz, APB2 max 170MHz
+        // System clock is 170MHz, so APB1 needs DIV2 (85MHz), APB2 can be DIV1 (170MHz)
+        config.rcc.apb1_pre = APBPrescaler::DIV2;
+        config.rcc.apb2_pre = APBPrescaler::DIV1;
+
         Self { config }
     }
 }

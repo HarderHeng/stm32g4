@@ -4,5 +4,7 @@
 //! simplifying peripheral usage for application code.
 
 mod serial;
+mod shell;
 
 pub use serial::*;
+pub use shell::*;
