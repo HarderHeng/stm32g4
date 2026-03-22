@@ -1,188 +1,200 @@
-//! Simple Shell for STM32G4
+//! Shell module using embedded-cli
 //!
-//! Minimal shell implementation with line editing and command execution.
+//! Provides a shell interface using the embedded-cli library.
 
-use embedded_io_async::Write;
+pub use embedded_cli::cli::Cli;
+pub use embedded_cli::Command;
 
-/// Maximum command line length
-pub const CMD_MAX_LEN: usize = 80;
+use core::convert::Infallible;
 
-/// Maximum history entries
-pub const HISTORY_COUNT: usize = 4;
+use embassy_stm32::usart::UartTx;
+use embassy_stm32::mode::Async;
+use embedded_cli::cli::{CliBuilder, CliHandle};
+use embedded_cli::codes;
+use embedded_io::Write;
+use static_cell::StaticCell;
+use ufmt::uwrite;
 
-/// Shell state
+/// LED subcommands
+#[derive(Command)]
+pub enum LedCommand {
+    /// Turn LED on
+    On,
+    /// Turn LED off
+    Off,
+    /// Toggle LED
+    Toggle,
+}
+
+/// System subcommands
+#[derive(Command)]
+pub enum SystemCommand {
+    /// Show system info
+    Info,
+}
+
+/// All commands
+#[derive(Command)]
+pub enum Command<'a> {
+    /// Say hello
+    Hello {
+        /// Name to greet
+        name: Option<&'a str>,
+    },
+    /// Clear screen
+    Clear,
+    /// Show version
+    Version,
+    /// Echo text
+    Echo {
+        /// Text to echo
+        text: Option<&'a str>,
+    },
+    /// Control LED
+    Led {
+        #[command(subcommand)]
+        command: LedCommand,
+    },
+    /// System commands
+    System {
+        #[command(subcommand)]
+        command: SystemCommand,
+    },
+}
+
+/// Process command callback
+fn process_command<W>(cli: &mut CliHandle<'_, W, W::Error>, cmd: Command<'_>)
+where
+    W: Write,
+{
+    let writer = cli.writer();
+    let _ = match cmd {
+        Command::Hello { name } => {
+            uwrite!(writer, "Hello, {}!\r\n", name.unwrap_or("World"))
+        }
+        Command::Clear => writer.write_str("\x1b[2J\x1b[H"),
+        Command::Version => writer.write_str("STM32G4 Shell v0.4.0\r\n"),
+        Command::Echo { text } => uwrite!(writer, "{}\r\n", text.unwrap_or("")),
+        Command::Led { command } => match command {
+            LedCommand::On => writer.write_str("LED ON\r\n"),
+            LedCommand::Off => writer.write_str("LED OFF\r\n"),
+            LedCommand::Toggle => writer.write_str("LED TOGGLE\r\n"),
+        },
+        Command::System { command } => match command {
+            SystemCommand::Info => writer.write_str("MCU: STM32G431CB\r\nClock: 170MHz\r\n"),
+        },
+    };
+}
+
+/// Static UART TX storage singleton
+/// Uses StaticCell to provide a mutable static reference
+pub static SHELL_TX: StaticCell<UartTx<'static, Async>> = StaticCell::new();
+
+/// Global mutable reference to the TX (set by init_shell_tx)
+static mut SHELL_TX_REF: *mut UartTx<'static, Async> = core::ptr::null_mut();
+
+/// Initialize shell TX with the given UART TX instance
+pub fn init_shell_tx(tx: UartTx<'static, Async>) {
+    let tx_ref = SHELL_TX.init(tx);
+    unsafe {
+        SHELL_TX_REF = tx_ref;
+    }
+}
+
+/// Get the initialized TX reference
+/// Panics if init_shell_tx has not been called
+pub fn get_shell_tx() -> &'static mut UartTx<'static, Async> {
+    unsafe {
+        if SHELL_TX_REF.is_null() {
+            panic!("Shell TX not initialized");
+        }
+        &mut *SHELL_TX_REF
+    }
+}
+
+/// Writer that uses a static mutable UART TX reference
+/// Implements embedded_io::Write for use with embedded-cli
+pub struct ShellWriter {
+    tx: &'static mut UartTx<'static, Async>,
+}
+
+impl ShellWriter {
+    /// Create a new shell writer
+    pub fn new(tx: &'static mut UartTx<'static, Async>) -> Self {
+        Self { tx }
+    }
+}
+
+impl embedded_io::ErrorType for ShellWriter {
+    type Error = Infallible;
+}
+
+impl Write for ShellWriter {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        // Block on the async write operation
+        embassy_futures::block_on(async {
+            match self.tx.write(buf).await {
+                Ok(_) => Ok(buf.len()),
+                Err(_) => Ok(buf.len()), // Ignore errors
+            }
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        embassy_futures::block_on(async {
+            let _ = self.tx.flush().await;
+            Ok(())
+        })
+    }
+}
+
+impl ufmt::uWrite for ShellWriter {
+    type Error = Infallible;
+
+    fn write_str(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.write_all(s.as_bytes())
+    }
+}
+
+/// Shell wrapper using embedded-cli
 pub struct Shell {
-    /// Command line buffer
-    line: [u8; CMD_MAX_LEN],
-    /// Current line length
-    len: usize,
-    /// Cursor position
-    cursor: usize,
-    /// History buffer
-    history: [[u8; CMD_MAX_LEN]; HISTORY_COUNT],
-    /// History lengths
-    history_len: [usize; HISTORY_COUNT],
-    /// History count
-    history_count: usize,
-    /// History head
-    history_head: usize,
+    cli: Cli<ShellWriter, Infallible, [u8; 128], [u8; 128]>,
 }
 
 impl Shell {
-    /// Create a new shell
-    pub const fn new() -> Self {
-        Self {
-            line: [0; CMD_MAX_LEN],
-            len: 0,
-            cursor: 0,
-            history: [[0; CMD_MAX_LEN]; HISTORY_COUNT],
-            history_len: [0; HISTORY_COUNT],
-            history_count: 0,
-            history_head: 0,
-        }
+    /// Create new shell with the given writer
+    pub fn new(writer: ShellWriter) -> Self {
+        let cli = CliBuilder::default()
+            .writer(writer)
+            .prompt("G431> ")
+            .command_buffer([0u8; 128])
+            .history_buffer([0u8; 128])
+            .build()
+            .expect("CLI build");
+        Self { cli }
     }
 
-    /// Process input byte, returns Some(()) when line is complete
-    pub fn process_byte(&mut self, byte: u8) -> Option<()> {
-        match byte {
-            // Enter
-            b'\r' | b'\n' => {
-                if self.len > 0 {
-                    // Save to history
-                    self.save_history();
-                    return Some(());
-                }
-                None
-            }
-            // Backspace
-            0x7f | b'\x08' => {
-                if self.cursor > 0 {
-                    // Shift left
-                    for i in self.cursor..self.len {
-                        self.line[i - 1] = self.line[i];
-                    }
-                    self.len -= 1;
-                    self.cursor -= 1;
-                }
-                None
-            }
-            // Control chars
-            0x00..=0x1f => None,
-            // Regular chars
-            _ => {
-                if self.len < CMD_MAX_LEN && self.cursor == self.len {
-                    self.line[self.len] = byte;
-                    self.len += 1;
-                    self.cursor += 1;
-                }
-                None
-            }
-        }
+    /// Process input byte
+    /// Handles terminal compatibility (e.g., DEL vs Backspace)
+    pub fn process(&mut self, byte: u8) {
+        // Many terminals send DEL (0x7F) instead of Backspace (0x08)
+        // Convert DEL to Backspace for compatibility
+        let byte = if byte == 0x7F { codes::BACKSPACE } else { byte };
+
+        let _ = self.cli.process_byte::<Command, _>(
+            byte,
+            &mut Command::processor(|cli, cmd| {
+                process_command(cli, cmd);
+                Ok(())
+            }),
+        );
     }
 
-    fn save_history(&mut self) {
-        self.history[self.history_head][..self.len]
-            .copy_from_slice(&self.line[..self.len]);
-        self.history_len[self.history_head] = self.len;
-        self.history_head = (self.history_head + 1) % HISTORY_COUNT;
-        if self.history_count < HISTORY_COUNT {
-            self.history_count += 1;
-        }
+    /// Print welcome message
+    pub fn print_welcome(&mut self) {
+        let _ = self.cli.write(|writer| {
+            writer.write_str("STM32G4 Shell v0.4.0\r\n")?;
+            writer.write_str("Type 'help' for commands\r\n")
+        });
     }
-
-    /// Get current line as bytes
-    pub fn line(&self) -> &[u8] {
-        &self.line[..self.len]
-    }
-
-    /// Clear the line after command execution
-    pub fn clear(&mut self) {
-        self.len = 0;
-        self.cursor = 0;
-    }
-
-    /// Redraw current line
-    pub async fn redraw<W: Write>(&self, tx: &mut W) -> Result<(), W::Error> {
-        tx.write(b"\r> ").await?;
-        tx.write(&self.line[..self.len]).await?;
-        tx.write(b" \x08").await?; // Clear trailing char
-        Ok(())
-    }
-}
-
-/// Print welcome message
-pub async fn print_welcome<W: Write>(tx: &mut W) -> Result<(), W::Error> {
-    tx.write(b"\r\nSTM32G4 Shell\r\n> ").await?;
-    Ok(())
-}
-
-/// Execute command
-pub async fn execute_command<W: Write>(tx: &mut W, line: &[u8]) -> Result<(), W::Error> {
-    // Skip leading spaces
-    let line = skip_spaces(line);
-    if line.is_empty() {
-        return Ok(());
-    }
-
-    // Get command name
-    let (cmd, args) = split_cmd(line);
-
-    match cmd {
-        b"help" => {
-            tx.write(b"Commands: help hello clear version echo led system\r\n").await?;
-        }
-        b"hello" => {
-            tx.write(b"Hello").await?;
-            if !args.is_empty() {
-                tx.write(b" ").await?;
-                tx.write(args).await?;
-            }
-            tx.write(b"!\r\n").await?;
-        }
-        b"clear" => {
-            tx.write(b"\x1b[2J\x1b[H").await?;
-        }
-        b"version" => {
-            tx.write(b"v0.3.0\r\n").await?;
-        }
-        b"echo" => {
-            if !args.is_empty() {
-                tx.write(args).await?;
-            }
-            tx.write(b"\r\n").await?;
-        }
-        b"led" => {
-            match args {
-                b"on" => { tx.write(b"LED ON\r\n").await?; }
-                b"off" => { tx.write(b"LED OFF\r\n").await?; }
-                b"toggle" => { tx.write(b"LED TOGGLE\r\n").await?; }
-                _ => { tx.write(b"Usage: led on|off|toggle\r\n").await?; }
-            }
-        }
-        b"system" => {
-            if args == b"info" {
-                tx.write(b"STM32G431CB 170MHz\r\n").await?;
-            } else {
-                tx.write(b"Usage: system info\r\n").await?;
-            }
-        }
-        _ => {
-            tx.write(b"Unknown: ").await?;
-            tx.write(cmd).await?;
-            tx.write(b"\r\n").await?;
-        }
-    }
-    Ok(())
-}
-
-fn skip_spaces(s: &[u8]) -> &[u8] {
-    let i = s.iter().position(|&b| b != b' ').unwrap_or(s.len());
-    &s[i..]
-}
-
-fn split_cmd(s: &[u8]) -> (&[u8], &[u8]) {
-    let end = s.iter().position(|&b| b == b' ').unwrap_or(s.len());
-    let cmd = &s[..end];
-    let rest = skip_spaces(&s[end..]);
-    (cmd, rest)
 }
