@@ -112,74 +112,76 @@ pub fn request_ota() -> ! {
 ///
 /// This function directly accesses Flash controller registers.
 unsafe fn write_boot_flag(flag: &BootFlag) {
-    // Flash controller base address
-    const FLASH_BASE: usize = 0x4002_2000;
-    const KEYR: usize = 0x04;
-    const SR: usize = 0x0C;
-    const CR: usize = 0x10;
+    unsafe {
+        // Flash controller base address
+        const FLASH_BASE: usize = 0x4002_2000;
+        const KEYR: usize = 0x04;
+        const SR: usize = 0x0C;
+        const CR: usize = 0x10;
 
-    const KEY1: u32 = 0x4567_0123;
-    const KEY2: u32 = 0xCDEF_89AB;
+        const KEY1: u32 = 0x4567_0123;
+        const KEY2: u32 = 0xCDEF_89AB;
 
-    const CR_PER: u32 = 1 << 1;
-    const CR_STRT: u32 = 1 << 16;
-    const CR_PG: u32 = 1 << 0;
-    const CR_LOCK: u32 = 1 << 31;
-    const SR_BSY: u32 = 1 << 16;
+        const CR_PER: u32 = 1 << 1;
+        const CR_STRT: u32 = 1 << 16;
+        const CR_PG: u32 = 1 << 0;
+        const CR_LOCK: u32 = 1 << 31;
+        const SR_BSY: u32 = 1 << 16;
 
-    // Unlock Flash
-    let keyr = (FLASH_BASE + KEYR) as *mut u32;
-    core::ptr::write_volatile(keyr, KEY1);
-    core::ptr::write_volatile(keyr, KEY2);
+        // Unlock Flash
+        let keyr = (FLASH_BASE + KEYR) as *mut u32;
+        core::ptr::write_volatile(keyr, KEY1);
+        core::ptr::write_volatile(keyr, KEY2);
 
-    // Erase page 8
-    let cr = (FLASH_BASE + CR) as *mut u32;
-    let sr = (FLASH_BASE + SR) as *const u32;
+        // Erase Boot Flag page (page 10)
+        let cr = (FLASH_BASE + CR) as *mut u32;
+        let sr = (FLASH_BASE + SR) as *const u32;
 
-    // Set page number (8) and PER bit
-    let mut cr_val = core::ptr::read_volatile(cr);
-    cr_val &= !(0x7F << 3); // Clear PNB
-    cr_val |= (BOOT_FLAG_PAGE as u32) << 3; // Set PNB = 8
-    cr_val |= CR_PER; // Page erase
-    core::ptr::write_volatile(cr, cr_val);
+        // Set page number and PER bit
+        let mut cr_val = core::ptr::read_volatile(cr);
+        cr_val &= !(0x7F << 3); // Clear PNB
+        cr_val |= (BOOT_FLAG_PAGE as u32) << 3; // Set PNB = BOOT_FLAG_PAGE
+        cr_val |= CR_PER; // Page erase
+        core::ptr::write_volatile(cr, cr_val);
 
-    // Start erase
-    cr_val |= CR_STRT;
-    core::ptr::write_volatile(cr, cr_val);
-
-    // Wait for completion
-    while core::ptr::read_volatile(sr) & SR_BSY != 0 {}
-
-    // Clear PER bit
-    let cr_val = core::ptr::read_volatile(cr);
-    core::ptr::write_volatile(cr, cr_val & !CR_PER);
-
-    // Write flag
-    let cr_val = core::ptr::read_volatile(cr);
-    core::ptr::write_volatile(cr, cr_val | CR_PG);
-
-    // Convert flag to bytes and write
-    let flag_bytes = core::slice::from_raw_parts(
-        flag as *const _ as *const u8,
-        core::mem::size_of::<BootFlag>(),
-    );
-
-    // Write in 8-byte chunks
-    for (i, chunk) in flag_bytes.chunks(8).enumerate() {
-        // Wait if busy
-        while core::ptr::read_volatile(sr) & SR_BSY != 0 {}
-
-        let dest = (BOOT_FLAG_ADDRESS as usize + i * 8) as *mut u64;
-        let mut padded = [0u8; 8];
-        padded[..chunk.len()].copy_from_slice(chunk);
-        let value = u64::from_le_bytes(padded);
-        core::ptr::write_volatile(dest, value);
+        // Start erase
+        cr_val |= CR_STRT;
+        core::ptr::write_volatile(cr, cr_val);
 
         // Wait for completion
         while core::ptr::read_volatile(sr) & SR_BSY != 0 {}
-    }
 
-    // Clear PG bit and lock
-    let cr_val = core::ptr::read_volatile(cr);
-    core::ptr::write_volatile(cr, (cr_val & !CR_PG) | CR_LOCK);
+        // Clear PER and PNB to restore CR to a safe state
+        let cr_val = core::ptr::read_volatile(cr);
+        core::ptr::write_volatile(cr, cr_val & !(CR_PER | (0x7F << 3)));
+
+        // Write flag
+        let cr_val = core::ptr::read_volatile(cr);
+        core::ptr::write_volatile(cr, cr_val | CR_PG);
+
+        // Convert flag to bytes and write
+        let flag_bytes = core::slice::from_raw_parts(
+            flag as *const _ as *const u8,
+            core::mem::size_of::<BootFlag>(),
+        );
+
+        // Write in 8-byte chunks
+        for (i, chunk) in flag_bytes.chunks(8).enumerate() {
+            // Wait if busy
+            while core::ptr::read_volatile(sr) & SR_BSY != 0 {}
+
+            let dest = (BOOT_FLAG_ADDRESS as usize + i * 8) as *mut u64;
+            let mut padded = [0u8; 8];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            let value = u64::from_le_bytes(padded);
+            core::ptr::write_volatile(dest, value);
+
+            // Wait for completion
+            while core::ptr::read_volatile(sr) & SR_BSY != 0 {}
+        }
+
+        // Clear PG bit and lock
+        let cr_val = core::ptr::read_volatile(cr);
+        core::ptr::write_volatile(cr, (cr_val & !CR_PG) | CR_LOCK);
+    }
 }

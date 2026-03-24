@@ -96,9 +96,9 @@ pub fn erase_page(page: u8) -> Result<(), &'static str> {
 
     unsafe {
         let cr = (FLASH_BASE + off::CR) as *mut u32;
-        // Clear PER bit
+        // Clear PER and PNB to restore CR to a safe state
         let val = core::ptr::read_volatile(cr);
-        core::ptr::write_volatile(cr, val & !cr::PER);
+        core::ptr::write_volatile(cr, val & !(cr::PER | (0x7F << 3)));
     }
 
     lock();
