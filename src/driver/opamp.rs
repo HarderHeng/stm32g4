@@ -1,111 +1,124 @@
-//! OPAMP driver for FOC motor control
+//! OPAMP driver for FOC motor current sensing
 //!
-//! Configures internal operational amplifiers in PGA (Programmable Gain Amplifier) mode
-//! for current sensing on each motor phase.
+//! Configures OPAMP1/2/3 in PGA mode (gain ×16, actual ≈9.14 due to resistor ratio)
+//! with **external** GPIO outputs so ADC can sample via regular pins.
 //!
-//! # Pin Mapping (B-G431B-ESC1)
+//! # Routing
 //!
-//! | OPAMP   | Input Pin | ADC Channel | Phase |
-//! |---------|-----------|-------------|-------|
-//! | OPAMP1  | PA1       | ADC1_CH13   | U     |
-//! | OPAMP2  | PA7       | ADC2_CH16   | V     |
-//! | OPAMP3  | PB0       | ADC2_CH18   | W     |
+//! | OPAMP  | +IN  | −IN(PGA) | External output | ADC channel         |
+//! |--------|------|----------|-----------------|---------------------|
+//! | OPAMP1 | PA1  | internal | PA2             | ADC1_CH3 (U phase)  |
+//! | OPAMP2 | PA7  | internal | PA6             | ADC2_CH3 (V phase)  |
+//! | OPAMP3 | PB0  | internal | PB1 + internal  | ADC1_CH12 / ADC2_CH18 (W phase) |
+//!
+//! OPAMP3 enables both external (PB1 → ADC1_CH12) and internal (OPAINTOEN=1 → ADC2_CH18)
+//! outputs simultaneously.
+//!
+//! # PAC-level configuration
+//!
+//! Embassy's `pga_ext` returns an `OpAmpOutput<'_, T>` that borrows the `OpAmp<'_, T>`.
+//! Keeping both alive in a struct would require a self-referential type.  Instead, we
+//! configure the OPAMPs directly through the PAC (the same registers Embassy would write)
+//! and set the GPIO pins to analog mode ourselves.
+//!
+//! CSR bit-field encoding (STM32G4 opamp_v5, RM0440 §25):
+//!  VM_SEL[1:0] = 0b10 → PGA mode
+//!  VP_SEL[1:0] = channel of the +IN pin (0 = IO1 for each OPAMP)
+//!  PGA_GAIN[4:0] = 0b00011 (GAIN16)
+//!  OPAINTOEN = 0 (OPAMP1/2 external only) / 1 (OPAMP3 both)
+//!  OPAMPEN = 1
 
-use embassy_stm32::opamp::{OpAmp, OpAmpGain, OpAmpSpeed};
-use embassy_stm32::peripherals::{OPAMP1, OPAMP2, OPAMP3};
+use embassy_stm32::gpio::Flex;
+use embassy_stm32::pac;
+use embassy_stm32::pac::opamp::vals::{PgaGain, VmSel, VpSel};
 use embassy_stm32::Peri;
 
-/// OPAMP gain setting
-/// The internal PGA supports gains of 2, 4, 8, or 16
-/// For B-G431B-ESC1 with 3mΩ shunt and 5A max current:
-/// - Max voltage across shunt: 5A * 0.003Ω = 15mV
-/// - With gain 8: 15mV * 8 = 120mV swing
-/// - This provides good resolution while staying within ADC range
-const CURRENT_SENSE_GAIN: OpAmpGain = OpAmpGain::Mul8;
+// ── PAC constants ─────────────────────────────────────────────────────────────
 
-/// OPAMP driver for three-phase current sensing
-///
-/// Configures all three internal OPAMPs in PGA mode with internal output
-/// connected to ADC channels.
+/// VM_SEL = 0b10 → PGA (inverting input connected to gain resistor array)
+const VM_SEL_PGA: u8 = 0b10;
+
+/// VP_SEL = 0 → IO1 for all three OPAMPs (PA1, PA7, PB0 respectively)
+const VP_SEL_IO1: u8 = 0;
+
+/// PGA_GAIN encoding for ×16 in opamp_v5 (RM0440 Table 206):
+/// 0b00011 = GAIN16
+const PGA_GAIN_X16: u8 = 0b00011;
+
+/// OPAMP driver token.  Dropped at shutdown to disable all amplifiers.
 pub struct CurrentSenseAmp {
-    /// U phase amplifier (OPAMP1 -> ADC1_CH13)
-    #[allow(dead_code)]
-    opamp1: OpAmp<'static, OPAMP1>,
-    /// V phase amplifier (OPAMP2 -> ADC2_CH16)
-    #[allow(dead_code)]
-    opamp2: OpAmp<'static, OPAMP2>,
-    /// W phase amplifier (OPAMP3 -> ADC2_CH18)
-    #[allow(dead_code)]
-    opamp3: OpAmp<'static, OPAMP3>,
+    _private: (),
 }
 
 impl CurrentSenseAmp {
-    /// Create a new OPAMP driver instance
-    ///
-    /// Configures all three OPAMPs in high-speed PGA mode with internal
-    /// output routing to ADC channels.
+    /// Initialise OPAMP1/2/3 in PGA ×16 mode with external output pins.
     ///
     /// # Arguments
-    ///
-    /// * `opamp1` - OPAMP1 peripheral
-    /// * `opamp2` - OPAMP2 peripheral
-    /// * `opamp3` - OPAMP3 peripheral
-    /// * `pa1` - U phase current sense input (PA1)
-    /// * `pa7` - V phase current sense input (PA7)
-    /// * `pb0` - W phase current sense input (PB0)
-    ///
-    /// # Returns
-    ///
-    /// Configured OPAMP driver with all amplifiers enabled
+    /// * `opamp1`/`opamp2`/`opamp3` — peripheral tokens (consumed to model ownership)
+    /// * `pa1`/`pa7`/`pb0` — non-inverting (+IN) input pins
+    /// * `pa2`/`pa6`/`pb1` — external output pins (set to analog mode)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        opamp1: Peri<'static, OPAMP1>,
-        opamp2: Peri<'static, OPAMP2>,
-        opamp3: Peri<'static, OPAMP3>,
-        pa1: Peri<'static, embassy_stm32::peripherals::PA1>,
-        pa7: Peri<'static, embassy_stm32::peripherals::PA7>,
-        pb0: Peri<'static, embassy_stm32::peripherals::PB0>,
+        _opamp1: Peri<'static, embassy_stm32::peripherals::OPAMP1>,
+        _opamp2: Peri<'static, embassy_stm32::peripherals::OPAMP2>,
+        _opamp3: Peri<'static, embassy_stm32::peripherals::OPAMP3>,
+        pa1:  Peri<'static, embassy_stm32::peripherals::PA1>,
+        pa7:  Peri<'static, embassy_stm32::peripherals::PA7>,
+        pb0:  Peri<'static, embassy_stm32::peripherals::PB0>,
+        pa2:  Peri<'static, embassy_stm32::peripherals::PA2>,
+        pa6:  Peri<'static, embassy_stm32::peripherals::PA6>,
+        pb1:  Peri<'static, embassy_stm32::peripherals::PB1>,
     ) -> Self {
-        // Configure OPAMP1 for U phase current sensing
-        // PGA mode with internal output to ADC1_CH13
-        let mut amp1 = OpAmp::new(opamp1, OpAmpSpeed::HighSpeed);
-        amp1.pga_int(pa1, CURRENT_SENSE_GAIN);
+        // Set all OPAMP I/O pins to analog mode (Hi-Z, no digital path).
+        // Flex::new() takes ownership and set_as_analog() configures the MODER register.
+        // The Flex tokens are then dropped (the mode register setting persists).
+        Flex::new(pa1).set_as_analog();
+        Flex::new(pa7).set_as_analog();
+        Flex::new(pb0).set_as_analog();
+        Flex::new(pa2).set_as_analog();
+        Flex::new(pa6).set_as_analog();
+        Flex::new(pb1).set_as_analog();
 
-        // Configure OPAMP2 for V phase current sensing
-        // PGA mode with internal output to ADC2_CH16
-        let mut amp2 = OpAmp::new(opamp2, OpAmpSpeed::HighSpeed);
-        amp2.pga_int(pa7, CURRENT_SENSE_GAIN);
+        // ── OPAMP1: PA1 (+IN IO1) → PA2 (external out) ───────────────────
+        pac::OPAMP1.csr().write(|w| {
+            w.set_vp_sel(VpSel::from_bits(VP_SEL_IO1));
+            w.set_vm_sel(VmSel::from_bits(VM_SEL_PGA));
+            w.set_pga_gain(PgaGain::from_bits(PGA_GAIN_X16));
+            w.set_opaintoen(false);
+            w.set_opampen(true);
+        });
 
-        // Configure OPAMP3 for W phase current sensing
-        // PGA mode with internal output to ADC2_CH18
-        let mut amp3 = OpAmp::new(opamp3, OpAmpSpeed::HighSpeed);
-        amp3.pga_int(pb0, CURRENT_SENSE_GAIN);
+        // ── OPAMP2: PA7 (+IN IO1) → PA6 (external out) ───────────────────
+        pac::OPAMP2.csr().write(|w| {
+            w.set_vp_sel(VpSel::from_bits(VP_SEL_IO1));
+            w.set_vm_sel(VmSel::from_bits(VM_SEL_PGA));
+            w.set_pga_gain(PgaGain::from_bits(PGA_GAIN_X16));
+            w.set_opaintoen(false);
+            w.set_opampen(true);
+        });
 
-        Self {
-            opamp1: amp1,
-            opamp2: amp2,
-            opamp3: amp3,
-        }
+        // ── OPAMP3: PB0 (+IN IO1) → PB1 (external) + ADC2_CH18 (internal)
+        pac::OPAMP3.csr().write(|w| {
+            w.set_vp_sel(VpSel::from_bits(VP_SEL_IO1));
+            w.set_vm_sel(VmSel::from_bits(VM_SEL_PGA));
+            w.set_pga_gain(PgaGain::from_bits(PGA_GAIN_X16));
+            w.set_opaintoen(true);  // enable internal output → ADC2_CH18
+            w.set_opampen(true);
+        });
+
+        Self { _private: () }
     }
 
-    /// Get the configured gain value
-    pub fn gain() -> f32 {
-        match CURRENT_SENSE_GAIN {
-            OpAmpGain::Mul2 => 2.0,
-            OpAmpGain::Mul4 => 4.0,
-            OpAmpGain::Mul8 => 8.0,
-            OpAmpGain::Mul16 => 16.0,
-            _ => 1.0, // Default non-PGA mode
-        }
+    /// Nominal register gain (×16). Actual current-sense gain ≈9.14.
+    pub fn nominal_gain() -> u8 {
+        16
     }
 }
 
-/// ADC channel assignments for current sensing
-/// These are the internal connections from OPAMP outputs
-pub mod adc_channels {
-    /// U phase current ADC channel (OPAMP1 output)
-    pub const U_PHASE_ADC1_CH: u8 = 13;
-    /// V phase current ADC channel (OPAMP2 output)
-    pub const V_PHASE_ADC2_CH: u8 = 16;
-    /// W phase current ADC channel (OPAMP3 output)
-    pub const W_PHASE_ADC2_CH: u8 = 18;
+impl Drop for CurrentSenseAmp {
+    fn drop(&mut self) {
+        pac::OPAMP1.csr().modify(|w| w.set_opampen(false));
+        pac::OPAMP2.csr().modify(|w| w.set_opampen(false));
+        pac::OPAMP3.csr().modify(|w| w.set_opampen(false));
+    }
 }

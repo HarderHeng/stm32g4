@@ -1,81 +1,86 @@
-//! PWM driver for FOC motor control
+//! PWM driver for 3-phase FOC motor control
 //!
-//! Provides 6-channel complementary PWM output using TIM1.
-//! Configured for center-aligned mode with hardware dead time insertion.
+//! Uses TIM1 in centre-aligned mode with complementary outputs on 3 phase channels
+//! and CH4 as the ADC injection trigger.
 //!
-//! # Pin Mapping (B-G431B-ESC1)
+//! # Key configuration
 //!
-//! | Channel | Pin  | Function |
-//! |---------|------|----------|
-//! | CH1     | PA8  | U phase high-side |
-//! | CH1N    | PC13 | U phase low-side |
-//! | CH2     | PA9  | V phase high-side |
-//! | CH2N    | PA12 | V phase low-side |
-//! | CH3     | PA10 | W phase high-side |
-//! | CH3N    | PB15 | W phase low-side |
+//! | Parameter | Value | Notes |
+//! |-----------|-------|-------|
+//! | Frequency | 20 kHz | ARR = 4250 @ 170 MHz ÷ 2 (centre) |
+//! | Dead time | 800 ns | DTG ≈ 136 ticks @ 170 MHz |
+//! | RCR | 1 | One UPDATE interrupt per full PWM cycle |
+//! | CH4 | PWM2, CCR4 = period/4 | ADC injection trigger via CC4 event |
+//! | Break | COMP1/2/4 via AF | Hardware over-current protection |
+//!
+//! # Pin mapping (B-G431B-ESC1)
+//!
+//! | Pin   | Signal   | Phase |
+//! |-------|----------|-------|
+//! | PA8   | TIM1_CH1  | U high-side |
+//! | PC13  | TIM1_CH1N | U low-side  |
+//! | PA9   | TIM1_CH2  | V high-side |
+//! | PA12  | TIM1_CH2N | V low-side  |
+//! | PA10  | TIM1_CH3  | W high-side |
+//! | PB15  | TIM1_CH3N | W low-side  |
+//! | PA11  | TIM1_CH4  | ADC trigger (no complementary) |
 
-use embassy_stm32::timer::complementary_pwm::ComplementaryPwm;
-use embassy_stm32::timer::complementary_pwm::ComplementaryPwmPin;
-use embassy_stm32::timer::simple_pwm::PwmPin;
+use embassy_stm32::timer::Channel;
+use embassy_stm32::timer::complementary_pwm::{ComplementaryPwm, ComplementaryPwmPin};
 use embassy_stm32::timer::low_level::CountingMode;
-use embassy_stm32::timer::{Channel, Ch1, Ch2, Ch3};
-use embassy_stm32::time::Hertz;
+use embassy_stm32::timer::simple_pwm::PwmPin;
+use embassy_stm32::timer::{Ch1, Ch2, Ch3, Ch4};
 use embassy_stm32::gpio::OutputType;
+use embassy_stm32::time::Hertz;
+use embassy_stm32::pac;
 
-/// PWM frequency in Hz (20kHz for motor control)
+use super::traits::PwmOutput;
+
+/// Timer frequency (170 MHz, same as APB2 × 2 with no prescaler on TIM1).
+const TIM1_CLK_HZ: u32 = 170_000_000;
+
+/// Desired switching frequency
 const PWM_FREQ_HZ: u32 = 20_000;
 
-/// Dead time in nanoseconds (800ns typical for MOSFET gate drivers)
-const DEAD_TIME_NS: u16 = 800;
+/// ARR = Fclk / (Fpwm * 2)  because centre-aligned mode counts up then down.
+/// 170_000_000 / (20_000 * 2) = 4250
+pub const PWM_PERIOD: u16 = (TIM1_CLK_HZ / (PWM_FREQ_HZ * 2)) as u16;
 
-/// PWM driver for 3-phase motor control
+/// Dead-time raw value passed to Embassy `set_dead_time()`.
+/// Embassy's `compute_dead_time_value()` encodes it per RM0440 §26.6.18 DTG[7:0].
+/// 136 > 127 → bit7 is set → uses DTG[7:5]=100 formula: DT = (64 + DTG[5:0]) × 2 × t_DTS
+/// = (64 + 8) × 2 / 170 MHz ≈ 847 ns  (closest achievable above 800 ns target)
+const DEAD_TIME_RAW: u16 = 136;
+
+/// PWM driver wrapping `ComplementaryPwm<TIM1>`.
 pub struct MotorPwm {
     pwm: ComplementaryPwm<'static, embassy_stm32::peripherals::TIM1>,
 }
 
 impl MotorPwm {
-    /// Create a new PWM driver instance
+    /// Initialise TIM1 for 3-phase complementary PWM + ADC trigger on CH4.
     ///
     /// # Arguments
-    ///
-    /// * `tim1` - TIM1 peripheral
-    /// * `pa8` - CH1 pin (U high-side)
-    /// * `pc13` - CH1N pin (U low-side)
-    /// * `pa9` - CH2 pin (V high-side)
-    /// * `pa12` - CH2N pin (V low-side)
-    /// * `pa10` - CH3 pin (W high-side)
-    /// * `pb15` - CH3N pin (W low-side)
-    ///
-    /// # Returns
-    ///
-    /// A configured PWM driver with all channels enabled
+    /// * Peripheral tokens for TIM1, the six phase pins, and PA11 (CH4 trigger).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tim1: embassy_stm32::Peri<'static, embassy_stm32::peripherals::TIM1>,
-        pa8: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA8>,
+        pa8:  embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA8>,
         pc13: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PC13>,
-        pa9: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA9>,
+        pa9:  embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA9>,
         pa12: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA12>,
         pa10: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA10>,
         pb15: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PB15>,
+        pa11: embassy_stm32::Peri<'static, embassy_stm32::peripherals::PA11>,
     ) -> Self {
-        // Configure PWM pins with push-pull output
-        let ch1: PwmPin<'_, embassy_stm32::peripherals::TIM1, Ch1> =
-            PwmPin::new(pa8, OutputType::PushPull);
-        let ch1n: ComplementaryPwmPin<'_, embassy_stm32::peripherals::TIM1, Ch1> =
-            ComplementaryPwmPin::new(pc13, OutputType::PushPull);
+        let ch1  = PwmPin::<_, Ch1>::new(pa8,  OutputType::PushPull);
+        let ch1n = ComplementaryPwmPin::<_, Ch1>::new(pc13, OutputType::PushPull);
+        let ch2  = PwmPin::<_, Ch2>::new(pa9,  OutputType::PushPull);
+        let ch2n = ComplementaryPwmPin::<_, Ch2>::new(pa12, OutputType::PushPull);
+        let ch3  = PwmPin::<_, Ch3>::new(pa10, OutputType::PushPull);
+        let ch3n = ComplementaryPwmPin::<_, Ch3>::new(pb15, OutputType::PushPull);
+        let ch4  = PwmPin::<_, Ch4>::new(pa11, OutputType::PushPull);
 
-        let ch2: PwmPin<'_, embassy_stm32::peripherals::TIM1, Ch2> =
-            PwmPin::new(pa9, OutputType::PushPull);
-        let ch2n: ComplementaryPwmPin<'_, embassy_stm32::peripherals::TIM1, Ch2> =
-            ComplementaryPwmPin::new(pa12, OutputType::PushPull);
-
-        let ch3: PwmPin<'_, embassy_stm32::peripherals::TIM1, Ch3> =
-            PwmPin::new(pa10, OutputType::PushPull);
-        let ch3n: ComplementaryPwmPin<'_, embassy_stm32::peripherals::TIM1, Ch3> =
-            ComplementaryPwmPin::new(pb15, OutputType::PushPull);
-
-        // Create complementary PWM in center-aligned mode
-        // Center-aligned mode is preferred for motor control as it reduces EMI
         let mut pwm = ComplementaryPwm::new(
             tim1,
             Some(ch1),
@@ -84,99 +89,88 @@ impl MotorPwm {
             Some(ch2n),
             Some(ch3),
             Some(ch3n),
-            None,  // CH4 not used
-            None,  // CH4N not used
+            Some(ch4),
+            None, // CH4 has no complementary output
             Hertz::hz(PWM_FREQ_HZ),
             CountingMode::CenterAlignedUpInterrupts,
         );
 
-        // Configure dead time
-        pwm.set_dead_time(Self::calculate_dead_time_value(DEAD_TIME_NS) as u16);
+        // RCR = 1: UPDATE interrupt fires once per full (up+down) PWM cycle.
+        pwm.set_repetition_counter(1);
 
-        // Enable all channels
-        pwm.enable(Channel::Ch1);
-        pwm.enable(Channel::Ch2);
-        pwm.enable(Channel::Ch3);
+        // Dead time ≈ 800 ns @ 170 MHz.
+        pwm.set_dead_time(DEAD_TIME_RAW);
 
-        // Set initial 50% duty cycle (motor stopped)
-        let max_duty = pwm.get_max_duty();
-        pwm.set_duty(Channel::Ch1, max_duty / 2);  // CH1 (U)
-        pwm.set_duty(Channel::Ch2, max_duty / 2);  // CH2 (V)
-        pwm.set_duty(Channel::Ch3, max_duty / 2);  // CH3 (W)
+        // CH4: PWM2 mode so CC4 fires on the down-count at CCR4.
+        // CH4 is enabled but never drives a load — it only produces the CC4 event
+        // that triggers ADC injected conversions.
+        // ccmr_output(1) = CCMR2 (covers CH3 + CH4)
+        // set_ocm(1, ...) sets the mode for CH4 (index 1 inside CCMR2)
+        pac::TIM1.ccmr_output(1).modify(|w| {
+            w.set_ocm(1, embassy_stm32::pac::timer::vals::Ocm::PWM_MODE2);
+        });
+        pwm.enable(Channel::Ch4);
+
+        // Initial ADC trigger position: slightly after the PWM valley (centre)
+        // so that the ADC samples when all low-side FETs are conducting.
+        // CCR4 = period/4 places the trigger in the lower quarter of the cycle.
+        pwm.set_duty(Channel::Ch4, (PWM_PERIOD / 4) as u32);
+
+        // Connect COMP1/2/4 outputs to TIM1 BRK (hardware OCP).
+        // comp_index 0 = COMP1, 1 = COMP2, 3 = COMP4 (0-based).
+        pwm.set_break_comparator_enable(0, true); // COMP1 → BRK
+        pwm.set_break_comparator_enable(1, true); // COMP2 → BRK
+        pwm.set_break_comparator_enable(3, true); // COMP4 → BRK
+
+        // Enable break (BDTR.BKE). All COMP outputs active-high by default.
+        pwm.set_break_enable(true);
+
+        // Leave motor phases disabled at startup — caller must call enable_outputs()
+        // after calibration is complete.
+
+        // Initial 50 % duty on phases (used while outputs are disabled).
+        let half = PWM_PERIOD / 2;
+        pwm.set_duty(Channel::Ch1, half as u32);
+        pwm.set_duty(Channel::Ch2, half as u32);
+        pwm.set_duty(Channel::Ch3, half as u32);
 
         Self { pwm }
     }
 
-    /// Calculate dead time register value for TIM1
-    ///
-    /// For STM32G4 at 170MHz:
-    /// - T_dts = 1 / 170MHz ≈ 5.88ns
-    /// - DTG[7:0] encoding:
-    ///   - If DTG[7] = 0: DT = DTG[6:0] * T_dts (max 136 * 5.88 = 800ns)
-    ///   - If DTG[7] = 1 and DTG[6] = 0: DT = (64 + DTG[5:0]) * 2 * T_dts
-    ///   - If DTG[7:6] = 10: DT = (32 + DTG[4:0]) * 8 * T_dts
-    ///   - If DTG[7:6] = 11: DT = (32 + DTG[4:0]) * 16 * T_dts
-    fn calculate_dead_time_value(dead_time_ns: u16) -> u8 {
-        // T_dts = 1 / 170MHz ≈ 5.88ns
-        const T_DTS_NS: f32 = 1000.0 / 170_000.0; // ~5.88ns
+    /// Direct access to the underlying Embassy PWM (for interrupt configuration etc.).
+    pub fn inner_mut(&mut self) -> &mut ComplementaryPwm<'static, embassy_stm32::peripherals::TIM1> {
+        &mut self.pwm
+    }
+}
 
-        let dt = dead_time_ns as f32;
-        let dt_units = dt / T_DTS_NS;
-
-        if dt_units <= 127.0 {
-            // DTG[7] = 0: DT = DTG[6:0] * T_dts
-            dt_units as u8
-        } else if dt_units <= 254.0 {
-            // DTG[7] = 1, DTG[6] = 0: DT = (64 + DTG[5:0]) * 2 * T_dts
-            let value = ((dt / (2.0 * T_DTS_NS)) - 64.0) as u8;
-            0x80 | (value & 0x3F)
-        } else if dt_units <= 1008.0 {
-            // DTG[7:6] = 10: DT = (32 + DTG[4:0]) * 8 * T_dts
-            let value = ((dt / (8.0 * T_DTS_NS)) - 32.0) as u8;
-            0xC0 | (value & 0x1F)
-        } else {
-            // DTG[7:6] = 11: DT = (32 + DTG[4:0]) * 16 * T_dts
-            let value = ((dt / (16.0 * T_DTS_NS)) - 32.0) as u8;
-            0xE0 | (value & 0x1F)
-        }
+impl PwmOutput for MotorPwm {
+    #[inline(always)]
+    fn set_duties_raw(&mut self, u: u16, v: u16, w: u16) {
+        self.pwm.set_duty(Channel::Ch1, u as u32);
+        self.pwm.set_duty(Channel::Ch2, v as u32);
+        self.pwm.set_duty(Channel::Ch3, w as u32);
     }
 
-    /// Set duty cycle for all three phases
-    ///
-    /// # Arguments
-    ///
-    /// * `u` - U phase duty (0.0 - 1.0)
-    /// * `v` - V phase duty (0.0 - 1.0)
-    /// * `w` - W phase duty (0.0 - 1.0)
-    pub fn set_duty(&mut self, u: f32, v: f32, w: f32) {
-        let max_duty = self.pwm.get_max_duty() as f32;
-
-        // Clamp duty cycles to valid range
-        let u_duty = ((u.clamp(0.0, 1.0) * max_duty) as u32).min(max_duty as u32);
-        let v_duty = ((v.clamp(0.0, 1.0) * max_duty) as u32).min(max_duty as u32);
-        let w_duty = ((w.clamp(0.0, 1.0) * max_duty) as u32).min(max_duty as u32);
-
-        self.pwm.set_duty(Channel::Ch1, u_duty);
-        self.pwm.set_duty(Channel::Ch2, v_duty);
-        self.pwm.set_duty(Channel::Ch3, w_duty);
+    #[inline(always)]
+    fn set_adc_trigger(&mut self, ccr4: u16) {
+        self.pwm.set_duty(Channel::Ch4, ccr4 as u32);
     }
 
-    /// Get the maximum duty cycle value
-    pub fn get_max_duty(&self) -> u16 {
-        self.pwm.get_max_duty() as u16
+    fn period() -> u16 {
+        PWM_PERIOD
     }
 
-    /// Enable PWM output
-    pub fn enable(&mut self) {
+    fn enable_outputs(&mut self) {
         self.pwm.enable(Channel::Ch1);
         self.pwm.enable(Channel::Ch2);
         self.pwm.enable(Channel::Ch3);
+        self.pwm.set_master_output_enable(true);
     }
 
-    /// Disable PWM output
-    pub fn disable(&mut self) {
+    fn disable_outputs(&mut self) {
         self.pwm.disable(Channel::Ch1);
         self.pwm.disable(Channel::Ch2);
         self.pwm.disable(Channel::Ch3);
+        self.pwm.set_master_output_enable(false);
     }
 }
