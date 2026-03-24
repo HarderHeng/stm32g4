@@ -11,7 +11,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{bind_interrupts, dma, peripherals, usart};
+use embassy_stm32::{bind_interrupts, dma, peripherals, usart, wdg::IndependentWatchdog};
 use embassy_stm32::usart::{Uart, UartRx, Config};
 use embassy_stm32::mode::Async;
 use {defmt_rtt as _, panic_probe as _};
@@ -19,8 +19,11 @@ use {defmt_rtt as _, panic_probe as _};
 use embassy_stm32g4_foc::driver::{init_shell_tx, get_shell_tx, ShellWriter, Shell};
 use embassy_stm32g4_foc::driver::{MotorPwm, CurrentSenseAmp, CurrentSenseAdc};
 
-/// APP start address (after bootloader 16KB + boot flag 2KB)
-const APP_START: u32 = 0x0800_8800;
+/// APP start address (after bootloader 20KB + boot flag 2KB)
+const APP_START: u32 = 0x0800_5800;
+
+/// IWDG timeout: 5 seconds. Heartbeat feeds every 1 s, so 5x margin.
+const IWDG_TIMEOUT_US: u32 = 5_000_000;
 
 bind_interrupts!(struct Irqs {
     USART2 => usart::InterruptHandler<peripherals::USART2>;
@@ -63,13 +66,20 @@ async fn shell_task(mut rx: UartRx<'static, Async>) {
     }
 }
 
+/// Heartbeat task: feeds the IWDG every second.
+///
+/// This task owns the watchdog. If the Embassy executor stalls (e.g. due to
+/// a spinloop, panic, or runaway interrupt), this task won't run, the IWDG
+/// will expire, and the bootloader will block the APP until new firmware is
+/// flashed via OTA.
 #[embassy_executor::task]
-async fn heartbeat() {
+async fn watchdog_task(mut wdg: IndependentWatchdog<'static, peripherals::IWDG>) {
     let mut count = 0u32;
     loop {
         embassy_time::Timer::after_secs(1).await;
         count += 1;
         info!("heartbeat {}", count);
+        wdg.pet();
     }
 }
 
@@ -82,6 +92,11 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_stm32g4_foc::bsp::init();
     info!("STM32G4 FOC Peripheral Init");
+
+    // Start IWDG before any other init. unleash() activates the countdown;
+    // the watchdog_task will pet() it every second.
+    let mut wdg = IndependentWatchdog::new(p.IWDG, IWDG_TIMEOUT_US);
+    wdg.unleash();
 
     // 1. Configure UART with 921600 baud rate
     let mut config = Config::default();
@@ -125,5 +140,5 @@ async fn main(spawner: Spawner) {
 
     // Spawn tasks
     spawner.spawn(unwrap!(shell_task(rx)));
-    spawner.spawn(unwrap!(heartbeat()));
+    spawner.spawn(unwrap!(watchdog_task(wdg)));
 }

@@ -1,6 +1,7 @@
 //! Minimal Bootloader for STM32G4
 //!
 //! This bootloader:
+//! - Detects IWDG reset (APP watchdog timeout) via RCC_CSR and stays in OTA mode
 //! - Checks Boot Flag for OTA request
 //! - Validates APP (SP range, Reset Handler range)
 //! - Jumps to APP if valid, otherwise enters OTA mode
@@ -12,12 +13,9 @@
 use core::arch::asm;
 
 use embassy_stm32g4_foc::bootloader::{
-    is_ota_requested, clear_ota_flag,
-    OtaHandler, uart, protocol::MAX_FRAME_SIZE,
+    check_and_clear_iwdg_reset, is_ota_requested, clear_ota_flag,
+    OtaHandler, uart, protocol::{MAX_FRAME_SIZE, APP_START, APP_END},
 };
-
-// APP memory layout
-const APP_START: u32 = 0x0800_5800;
 
 // RAM bounds
 const RAM_START: u32 = 0x2000_0000;
@@ -25,11 +23,21 @@ const RAM_END: u32 = 0x2000_8000;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    // Check Boot Flag for OTA request
+    // ---- Step 1: Detect IWDG reset FIRST (RCC_CSR is valid right after reset) ----
+    // check_and_clear_iwdg_reset() reads RCC_CSR.IWDGRSTF and clears RMVF so that
+    // subsequent soft resets (e.g. the RESET command sent at end of OTA) are not
+    // misidentified.  No Flash write needed — we simply use the live register.
+    if check_and_clear_iwdg_reset() {
+        // APP watchdog fired — block APP entry until new firmware is flashed.
+        enter_ota_mode();
+    }
+
+    // ---- Step 2: Check Boot Flag ----
+
+    // Normal OTA request from APP
     if is_ota_requested() {
         // Clear the flag to prevent boot loop
         let _ = clear_ota_flag();
-        // Enter OTA mode
         enter_ota_mode();
     }
 
@@ -87,7 +95,7 @@ fn validate_app() -> Option<(u32, u32)> {
         }
 
         // Validate PC (must be in APP region, odd for Thumb)
-        if pc < APP_START || pc > (APP_START + 0x20000) {
+        if pc < APP_START || pc >= APP_END {
             return None;
         }
         if pc & 1 == 0 {

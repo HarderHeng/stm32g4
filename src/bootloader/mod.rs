@@ -1,7 +1,7 @@
 //! Bootloader module for STM32G4
 //!
 //! Provides:
-//! - Boot Flag storage and management
+//! - Boot Flag storage and management (OTA request, watchdog reset detection)
 //! - Flash operations
 //! - Simple OTA protocol over UART
 
