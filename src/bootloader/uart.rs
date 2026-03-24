@@ -6,6 +6,7 @@
 const USART2_BASE: usize = 0x4000_4400;
 
 /// Register offsets
+#[allow(dead_code)]
 mod off {
     pub const CR1: usize = 0x00;
     pub const CR2: usize = 0x04;
@@ -27,6 +28,8 @@ mod cr1 {
 mod isr {
     pub const TXE: u32 = 1 << 7;
     pub const RXNE: u32 = 1 << 5;
+    /// Transmission Complete: shift register empty, all bits physically sent
+    pub const TC: u32 = 1 << 6;
 }
 
 /// Initialize USART2 for bootloader
@@ -139,5 +142,19 @@ pub fn write_byte(byte: u8) {
 pub fn write_bytes(data: &[u8]) {
     for &byte in data {
         write_byte(byte);
+    }
+}
+
+/// Wait until the UART shift register is fully empty (Transmission Complete).
+///
+/// Unlike TXE (TX data register empty), TC guarantees that the last byte's
+/// bits have all been physically shifted out onto the wire. Call this before
+/// any action that would cut power or reset the UART (e.g. sys_reset).
+pub fn wait_tx_complete() {
+    unsafe {
+        let isr = (USART2_BASE + off::ISR) as *const u32;
+        while core::ptr::read_volatile(isr) & isr::TC == 0 {
+            cortex_m::asm::nop();
+        }
     }
 }

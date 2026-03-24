@@ -4,6 +4,7 @@
 
 use crate::bootloader::flash;
 use crate::bootloader::protocol::*;
+use crate::bootloader::uart;
 
 /// OTA Handler
 pub struct OtaHandler {
@@ -148,13 +149,15 @@ impl OtaHandler {
             return build_response(CMD_RESET, STATUS_INVALID_PARAM, &[], response);
         }
 
-        // Response before reset
+        // Build and send the response NOW, before resetting.
+        // We cannot rely on the caller (main loop) to send it because sys_reset()
+        // never returns — the caller's uart::write_bytes() would never execute.
         let len = build_response(CMD_RESET, STATUS_OK, &[], response);
+        uart::write_bytes(&response[..len]);
 
-        // Small delay to ensure response is sent
-        for _ in 0..10000 {
-            cortex_m::asm::nop();
-        }
+        // Wait for the shift register to drain completely (TC flag) so the last
+        // byte is physically on the wire before we cut execution.
+        uart::wait_tx_complete();
 
         // System reset
         cortex_m::peripheral::SCB::sys_reset();
