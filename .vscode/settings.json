@@ -1,7 +1,9 @@
 {
-        "rust-analyzer.checkOnSave.allTargets": false,
-        "rust-analyzer.checkOnSave.extraArgs": [
-                        "--target",
-                        "thumbv7em-none-eabihf"
-        ]
+    "rust-analyzer.checkOnSave.allTargets": false,
+    "rust-analyzer.checkOnSave.extraArgs": [
+        "--target",
+        "thumbv7em-none-eabihf"
+    ],
+    "rust-analyzer.cargo.features": ["app"],
+    "rust-analyzer.cargo.target": "thumbv7em-none-eabihf"
 }
