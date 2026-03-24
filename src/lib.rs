@@ -12,6 +12,10 @@
 // Shared module (for both bootloader and APP)
 pub mod shared;
 
+// Low-level Flash register primitives — compiled unconditionally so both
+// shared (APP-side request_ota) and the bootloader module can use them.
+pub(crate) mod flash_raw;
+
 // Only compile these modules for APP (not bootloader)
 #[cfg(not(feature = "bootloader"))]
 pub mod bsp;
