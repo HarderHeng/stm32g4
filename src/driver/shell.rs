@@ -106,8 +106,9 @@ where
         Command::System { command } => match command {
             SystemCommand::Info => writer.write_str("MCU: STM32G431CB\r\nClock: 170MHz\r\nFOC: enabled\r\nBootloader: v1.0\r\n"),
             SystemCommand::Ota => {
-                // TODO: Implement OTA trigger after bootloader is ready
-                writer.write_str("OTA mode not implemented yet\r\n")
+                let _ = writer.write_str("Entering OTA mode...\r\n");
+                // Request OTA mode (will reset)
+                crate::shared::request_ota();
             }
         },
     };

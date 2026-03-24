@@ -1,0 +1,13 @@
+[package]
+name = "ota-tool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serialport = "4.5"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+
+# Force default target for this tool
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("none"))'] }

@@ -21,3 +21,4 @@ Thumbs.db
 *.elf
 *.hex
 *.map
+a.out
