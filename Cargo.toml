@@ -22,7 +22,7 @@ embassy-stm32 = { version = "0.6.0", features = ["defmt", "time-driver-any", "st
 embassy-sync = { version = "0.8.0", features = ["defmt"], optional = true }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"], optional = true }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime", "tick-hz-32_768"], optional = true }
-embassy-futures = { path = "../embassy-futures", optional = true }
+embassy-futures = { version = "*", optional = true }
 
 defmt = { version = "1.0.1", optional = true }
 defmt-rtt = { version = "1.0.0", optional = true }

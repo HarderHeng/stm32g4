@@ -274,7 +274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0641612053b2f34fc250bb63f6630ae75de46e02ade7f457268447081d709ce"
 dependencies = [
  "defmt 1.0.1",
- "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-futures",
  "embassy-hal-internal 0.4.0",
  "embassy-sync",
  "embassy-time",
@@ -318,10 +318,6 @@ name = "embassy-executor-timer-queue"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fc328bf943af66b80b98755db9106bf7e7471b0cf47dc8559cd9a6be504cc9c"
-
-[[package]]
-name = "embassy-futures"
-version = "0.1.2"
 
 [[package]]
 name = "embassy-futures"
@@ -376,7 +372,7 @@ dependencies = [
  "defmt 1.0.1",
  "document-features",
  "embassy-embedded-hal",
- "embassy-futures 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-futures",
  "embassy-hal-internal 0.5.0",
  "embassy-net-driver",
  "embassy-sync",
@@ -421,7 +417,7 @@ dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
  "embassy-executor",
- "embassy-futures 0.1.2",
+ "embassy-futures",
  "embassy-stm32",
  "embassy-sync",
  "embassy-time",
