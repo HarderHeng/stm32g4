@@ -11,12 +11,13 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{bind_interrupts, dma, peripherals, usart, wdg::IndependentWatchdog};
-use embassy_stm32::usart::{Uart, UartRx, Config};
-use embassy_stm32::mode::Async;
+use embassy_stm32::{bind_interrupts, peripherals, usart, wdg::IndependentWatchdog};
+use embassy_stm32::usart::Config;
+use embedded_io_async::Read;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
-use embassy_stm32g4_foc::driver::{init_shell_tx, get_shell_tx, ShellWriter, Shell};
+use embassy_stm32g4_foc::driver::{init_shell, get_shell_tx, ShellWriter, Shell};
 use embassy_stm32g4_foc::driver::{MotorPwm, CurrentSenseAmp, CurrentSenseAdc};
 
 /// APP start address (after bootloader 20KB + boot flag 2KB)
@@ -26,41 +27,25 @@ const APP_START: u32 = 0x0800_5800;
 const IWDG_TIMEOUT_US: u32 = 5_000_000;
 
 bind_interrupts!(struct Irqs {
-    USART2 => usart::InterruptHandler<peripherals::USART2>;
-    DMA1_CHANNEL1 => dma::InterruptHandler<peripherals::DMA1_CH1>;
-    DMA1_CHANNEL2 => dma::InterruptHandler<peripherals::DMA1_CH2>;
+    USART2 => usart::BufferedInterruptHandler<peripherals::USART2>;
 });
 
 #[embassy_executor::task]
-async fn shell_task(mut rx: UartRx<'static, Async>) {
+async fn shell_task(mut rx: embassy_stm32::usart::BufferedUartRx<'static>) {
     // Create shell with the initialized TX
     let writer = ShellWriter::new(get_shell_tx());
     let mut shell = Shell::new(writer);
 
     shell.print_welcome();
 
-    // Error tracking: ignore occasional errors during startup
-    // but report if errors persist after initial period
-    let mut error_count: u8 = 0;
-    let startup_grace_period = embassy_time::Instant::now();
-
     let mut buf = [0u8; 1];
     loop {
         match rx.read(&mut buf).await {
-            Ok(()) => {
-                // Reset error count on successful read
-                error_count = 0;
+            Ok(_) => {
                 shell.process(buf[0]);
             }
             Err(e) => {
-                error_count = error_count.saturating_add(1);
-
-                // Allow a few errors during startup grace period (first 100ms)
-                // Otherwise report persistent errors
-                let elapsed_ms = startup_grace_period.elapsed().as_millis();
-                if elapsed_ms > 100 || error_count > 3 {
-                    error!("RX error: {:?} (count: {})", e, error_count);
-                }
+                error!("RX error: {:?}", e);
             }
         }
     }
@@ -98,42 +83,40 @@ async fn main(spawner: Spawner) {
     let mut wdg = IndependentWatchdog::new(p.IWDG, IWDG_TIMEOUT_US);
     wdg.unleash();
 
-    // 1. Configure UART with 921600 baud rate
+    // 1. Configure UART with 921600 baud rate using BufferedUart
     let mut config = Config::default();
     config.baudrate = 921600;
 
-    let uart = Uart::new(p.USART2, p.PB4, p.PB3, p.DMA1_CH2, p.DMA1_CH1, Irqs, config)
-        .expect("UART");
-    let (tx, rx) = uart.split();
-
-    // Initialize TX storage before spawning shell task
-    init_shell_tx(tx);
+    let rx = init_shell(p.USART2, p.PB3, p.PB4, Irqs, config);
 
     // 2. Initialize OPAMP for current sensing (must be before ADC)
     // OPAMP internal outputs are connected to ADC channels:
     // - OPAMP1 (PA1) -> ADC1_CH13 (U phase)
     // - OPAMP2 (PA7) -> ADC2_CH16 (V phase)
     // - OPAMP3 (PB0) -> ADC2_CH18 (W phase)
-    let _opamp = CurrentSenseAmp::new(
+    static OPAMP: StaticCell<CurrentSenseAmp> = StaticCell::new();
+    let _opamp = OPAMP.init(CurrentSenseAmp::new(
         p.OPAMP1, p.OPAMP2, p.OPAMP3,
         p.PA1, p.PA7, p.PB0,
-    );
+    ));
     info!("OPAMP initialized (gain: {})", CurrentSenseAmp::gain());
 
     // 3. Initialize PWM for motor control
     // TIM1 generates 6-channel complementary PWM at 20kHz
     // Dead time is set to 800ns for L6387E gate driver
-    let _pwm = MotorPwm::new(
+    static PWM: StaticCell<MotorPwm> = StaticCell::new();
+    let _pwm = PWM.init(MotorPwm::new(
         p.TIM1,
         p.PA8, p.PC13,   // CH1 (U phase): PA8 high-side, PC13 low-side
         p.PA9, p.PA12,   // CH2 (V phase): PA9 high-side, PA12 low-side
         p.PA10, p.PB15,  // CH3 (W phase): PA10 high-side, PB15 low-side
-    );
+    ));
     info!("PWM initialized (20kHz, 800ns dead time)");
 
     // 4. Initialize ADC for current sampling
     // ADC1 and ADC2 in dual injected mode for synchronized sampling
-    let _adc = CurrentSenseAdc::new(p.ADC1, p.ADC2);
+    static ADC: StaticCell<CurrentSenseAdc> = StaticCell::new();
+    let _adc = ADC.init(CurrentSenseAdc::new(p.ADC1, p.ADC2));
     info!("ADC initialized (dual injected mode)");
 
     info!("All peripherals initialized successfully");

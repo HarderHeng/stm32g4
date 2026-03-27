@@ -5,6 +5,7 @@
 use embassy_stm32::rcc::*;
 use embassy_stm32::time::Hertz;
 use embassy_stm32::Config;
+use embassy_stm32::pac::rcc::vals::Adcsel;
 
 /// Board configuration structure
 pub struct BoardConfig {
@@ -25,11 +26,12 @@ impl Default for BoardConfig {
 
         // Configure PLL for 170MHz system clock
         // PLL: HSE(8MHz) / DIV2 * MUL85 / DIV2 = 170MHz
+        // PLL P output: 8MHz / 2 * 85 / 17 = 20MHz (for ADC, max 60MHz)
         config.rcc.pll = Some(Pll {
             source: PllSource::HSE,
             prediv: PllPreDiv::DIV2,
             mul: PllMul::MUL85,
-            divp: None,
+            divp: Some(PllPDiv::DIV17), // ADC clock: 20MHz
             divq: None,
             divr: Some(PllRDiv::DIV2),
         });
@@ -42,6 +44,9 @@ impl Default for BoardConfig {
         // System clock is 170MHz, so APB1 needs DIV2 (85MHz), APB2 can be DIV1 (170MHz)
         config.rcc.apb1_pre = APBPrescaler::DIV2;
         config.rcc.apb2_pre = APBPrescaler::DIV1;
+
+        // Configure ADC12 clock mux to use PLL1_P
+        config.rcc.mux.adc12sel = Adcsel::PLL1_P;
 
         Self { config }
     }

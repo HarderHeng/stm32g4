@@ -7,8 +7,11 @@ pub use embedded_cli::Command;
 
 use core::convert::Infallible;
 
-use embassy_stm32::usart::UartTx;
-use embassy_stm32::mode::Async;
+use embassy_stm32::usart::{BufferedUartTx, BufferedInterruptHandler, Config};
+use embassy_stm32::interrupt::typelevel::Binding;
+use embassy_stm32::peripherals::USART2;
+use embassy_stm32::usart::{TxPin, RxPin, Instance};
+use embassy_stm32::Peri;
 use embedded_cli::cli::{CliBuilder, CliHandle};
 use embedded_cli::codes;
 use embedded_io::Write;
@@ -114,24 +117,58 @@ where
     };
 }
 
-/// Static UART TX storage singleton
-/// Uses StaticCell to provide a mutable static reference
-pub static SHELL_TX: StaticCell<UartTx<'static, Async>> = StaticCell::new();
+/// TX buffer size
+const TX_BUF_SIZE: usize = 256;
 
-/// Global mutable reference to the TX (set by init_shell_tx)
-static mut SHELL_TX_REF: *mut UartTx<'static, Async> = core::ptr::null_mut();
+/// RX buffer size
+const RX_BUF_SIZE: usize = 256;
 
-/// Initialize shell TX with the given UART TX instance
-pub fn init_shell_tx(tx: UartTx<'static, Async>) {
+/// Static TX buffer
+static TX_BUF: StaticCell<[u8; TX_BUF_SIZE]> = StaticCell::new();
+
+/// Static RX buffer
+static RX_BUF: StaticCell<[u8; RX_BUF_SIZE]> = StaticCell::new();
+
+/// Static UART TX storage
+static SHELL_TX: StaticCell<BufferedUartTx<'static>> = StaticCell::new();
+
+/// Global mutable reference to the TX (set by init_shell)
+static mut SHELL_TX_REF: *mut BufferedUartTx<'static> = core::ptr::null_mut();
+
+/// Initialize shell with BufferedUart TX/RX
+/// Returns the RX half for use in shell_task
+pub fn init_shell<Tx, Rx, I>(
+    usart: Peri<'static, USART2>,
+    tx_pin: Peri<'static, Tx>,
+    rx_pin: Peri<'static, Rx>,
+    irq: I,
+    config: Config,
+) -> embassy_stm32::usart::BufferedUartRx<'static>
+where
+    Tx: TxPin<USART2>,
+    Rx: RxPin<USART2>,
+    I: Binding<<USART2 as Instance>::Interrupt, BufferedInterruptHandler<USART2>> + 'static,
+{
+    let tx_buf = TX_BUF.init([0u8; TX_BUF_SIZE]);
+    let rx_buf = RX_BUF.init([0u8; RX_BUF_SIZE]);
+
+    let uart = embassy_stm32::usart::BufferedUart::new(
+        usart, rx_pin, tx_pin, tx_buf, rx_buf, irq, config
+    ).expect("BufferedUart config");
+
+    let (tx, rx) = uart.split();
+
     let tx_ref = SHELL_TX.init(tx);
     unsafe {
         SHELL_TX_REF = tx_ref;
     }
+
+    rx
 }
 
 /// Get the initialized TX reference
-/// Panics if init_shell_tx has not been called
-pub fn get_shell_tx() -> &'static mut UartTx<'static, Async> {
+/// Panics if init_shell has not been called
+pub fn get_shell_tx() -> &'static mut BufferedUartTx<'static> {
     unsafe {
         if SHELL_TX_REF.is_null() {
             panic!("Shell TX not initialized");
@@ -140,15 +177,17 @@ pub fn get_shell_tx() -> &'static mut UartTx<'static, Async> {
     }
 }
 
-/// Writer that uses a static mutable UART TX reference
+/// Writer that uses a static mutable BufferedUartTx reference
 /// Implements embedded_io::Write for use with embedded-cli
+/// Uses blocking_write which writes to a ring buffer (safe in async context
+/// because it doesn't block on hardware, just on buffer space)
 pub struct ShellWriter {
-    tx: &'static mut UartTx<'static, Async>,
+    tx: &'static mut BufferedUartTx<'static>,
 }
 
 impl ShellWriter {
     /// Create a new shell writer
-    pub fn new(tx: &'static mut UartTx<'static, Async>) -> Self {
+    pub fn new(tx: &'static mut BufferedUartTx<'static>) -> Self {
         Self { tx }
     }
 }
@@ -159,20 +198,18 @@ impl embedded_io::ErrorType for ShellWriter {
 
 impl Write for ShellWriter {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        // Block on the async write operation
-        embassy_futures::block_on(async {
-            match self.tx.write(buf).await {
-                Ok(_) => Ok(buf.len()),
-                Err(_) => Ok(buf.len()), // Ignore errors
-            }
-        })
+        // Use embedded_io::Write trait method which calls blocking_write internally
+        // This is safe in async context - it only blocks if buffer is full,
+        // and the interrupt handler will drain the buffer
+        match <BufferedUartTx<'_> as Write>::write(self.tx, buf) {
+            Ok(len) => Ok(len),
+            Err(_) => Ok(buf.len()), // Ignore errors, report all bytes written
+        }
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        embassy_futures::block_on(async {
-            let _ = self.tx.flush().await;
-            Ok(())
-        })
+        let _ = <BufferedUartTx<'_> as Write>::flush(self.tx);
+        Ok(())
     }
 }
 
