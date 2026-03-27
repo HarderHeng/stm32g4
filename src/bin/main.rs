@@ -322,12 +322,17 @@ async fn main(spawner: Spawner) {
 // ── TIM1_UP Interrupt Handler ──────────────────────────────────────────────
 /// This function is called by the hardware when TIM1 UPDATE interrupt fires.
 /// It signals the FOC task to execute the control cycle.
+///
+/// # Safety Notes
+/// - Uses `write(|w| w.set_uif(true))` because UIF is W1C (Write-1-to-Clear)
+/// - Do NOT use `modify()` which could inadvertently clear other status bits
 #[unsafe(no_mangle)]
 fn tim1_up_irqhandler() {
     use embassy_stm32::pac;
 
-    // Clear the UPDATE interrupt flag
-    pac::TIM1.sr().modify(|w| w.set_uif(false));
+    // Clear the UPDATE interrupt flag (W1C — write 1 to clear)
+    // RM0440 §26.9.3: SR register bits are cleared by writing 1
+    pac::TIM1.sr().write(|w| w.set_uif(true));
 
     // Signal the FOC task to run
     let signal = unsafe {

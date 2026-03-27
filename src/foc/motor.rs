@@ -26,6 +26,10 @@ use super::transforms::{clarke_park, inv_park_transform, ElectricalAngle};
 use super::pi::{PiController, DualCurrentController};
 use super::svpwm::{SvpwmModulator, Sector, calculate_adc_trigger};
 
+/// Minimum valid DC bus voltage for SVPWM modulation.
+/// Below this value, division by Vbus would cause numerical instability.
+const MIN_VBUS_VOLTAGE: f32 = 1.0;
+
 /// FOC operating modes
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocMode {
@@ -112,6 +116,8 @@ pub struct FocController<PWM: PwmOutput, ADC: CurrentSampler> {
     /// Last voltage commands
     v_alpha: f32,
     v_beta: f32,
+    /// SVPWM modulator (persistent to avoid stack allocation in control_cycle)
+    svpwm: SvpwmModulator,
 }
 
 impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
@@ -138,7 +144,13 @@ impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
     ) -> Self {
         // Current loop bandwidth: typically 1-2 kHz for FOC
         let current_bandwidth = 1000.0;
-        let max_voltage = vbus_nominal / 1.732; // Vbus/sqrt(3)
+        // Validate Vbus before using - prevent division by zero
+        let vbus = if vbus_nominal >= MIN_VBUS_VOLTAGE {
+            vbus_nominal
+        } else {
+            MIN_VBUS_VOLTAGE // Fallback to minimum valid voltage
+        };
+        let max_voltage = vbus / 1.732; // Vbus/sqrt(3)
 
         let current_ctrl = DualCurrentController::from_motor_params(
             current_bandwidth,
@@ -155,6 +167,9 @@ impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
             max_current,
         );
 
+        // Pre-allocate SVPWM modulator to avoid stack allocation in control_cycle
+        let svpwm = SvpwmModulator::new(PWM::period(), 0.577, vbus);
+
         Self {
             pwm,
             adc,
@@ -164,7 +179,7 @@ impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
             ls,
             ke,
             max_current,
-            vbus: vbus_nominal,
+            vbus,
             electrical_angle: ElectricalAngle::default(),
             omega_e: 0.0,
             last_sector: Sector::Sector0,
@@ -181,6 +196,7 @@ impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
             i_q: 0.0,
             v_alpha: 0.0,
             v_beta: 0.0,
+            svpwm,
         }
     }
 
@@ -312,9 +328,9 @@ impl<PWM: PwmOutput, ADC: CurrentSampler> FocController<PWM, ADC> {
         self.v_beta = v_beta;
 
         // ── 6. SVPWM modulation ─────────────────────────────────────────────
-        let mut svpwm = SvpwmModulator::new(PWM::period(), 0.577, self.vbus);
-        let (duty_u, duty_v, duty_w) = svpwm.generate_duties(v_alpha, v_beta);
-        self.last_sector = svpwm.last_sector();
+        // Use persistent svpwm member to avoid stack allocation
+        let (duty_u, duty_v, duty_w) = self.svpwm.generate_duties(v_alpha, v_beta);
+        self.last_sector = self.svpwm.last_sector();
 
         // ── 7. Update PWM ───────────────────────────────────────────────────
         self.pwm.set_duties_raw(duty_u, duty_v, duty_w);

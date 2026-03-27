@@ -84,7 +84,7 @@ pub struct SvpwmModulator {
     period: u16,
     /// Maximum modulation index (0.577 for linear, up to 0.637 for overmodulation)
     max_modulation: f32,
-    /// Inverse DC bus voltage for normalization
+    /// Inverse DC bus voltage for normalization (pre-computed to avoid division)
     inv_vbus: f32,
     /// Last computed sector
     last_sector: Sector,
@@ -97,11 +97,19 @@ impl SvpwmModulator {
     /// * `period` - PWM timer period (ARR value)
     /// * `max_modulation` - Maximum modulation index (0.577 = linear region limit)
     /// * `vbus_nominal` - Nominal DC bus voltage for per-unit scaling
+    ///
+    /// # Panics
+    /// In debug mode, panics if `vbus_nominal` is too low (< 1.0V) to prevent
+    /// division by zero or near-zero values that would cause numerical instability.
     pub fn new(period: u16, max_modulation: f32, vbus_nominal: f32) -> Self {
+        // Prevent division by zero or near-zero (would cause massive duties)
+        // Minimum valid Vbus is 1.0V (well below any practical operating voltage)
+        debug_assert!(vbus_nominal >= 1.0, "Vbus must be >= 1.0V");
+
         Self {
             period,
             max_modulation,
-            inv_vbus: 1.0 / vbus_nominal,
+            inv_vbus: if vbus_nominal > 1.0 { 1.0 / vbus_nominal } else { 0.0 },
             last_sector: Sector::Sector0,
         }
     }

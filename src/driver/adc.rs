@@ -211,14 +211,28 @@ impl CurrentSenseAdc {
 
     /// Read the injected data registers after a conversion completes.
     /// Should be called from the ADC or PWM interrupt handler after JEOC/JEOS.
+    ///
+    /// # Safety
+    /// This function assumes it is called after JEOS (End of Sequence) is set.
+    /// In hardware-triggered mode, this is guaranteed by the TIM1_CC4 trigger
+    /// and RCR configuration. If called prematurely, may read stale data.
     #[inline(always)]
     pub fn latch_injected(&mut self) {
+        // Read JDR before clearing flags — hardware guarantees data validity
+        // after JEOS is set. In dual injected mode, both ADCs convert
+        // simultaneously, so we read both even if only one triggered.
         self.raw_adc1 = pac::ADC1.jdr(0).read().jdata();
         self.raw_adc2 = pac::ADC2.jdr(0).read().jdata();
-        // Clear JEOS flags (W1C — must use write(), not modify(), to avoid
-        // inadvertently clearing other pending status bits).
-        pac::ADC1.isr().write(|w| w.set_jeos(true));
-        pac::ADC2.isr().write(|w| w.set_jeos(true));
+        // Clear JEOS + JEOC flags (W1C — must use write(), not modify())
+        // RM0440 §24.9.2: ISR flags are cleared by writing 1
+        pac::ADC1.isr().write(|w| {
+            w.set_jeos(true);
+            w.set_jeoc(true);  // Also clear EOC to prevent overrun
+        });
+        pac::ADC2.isr().write(|w| {
+            w.set_jeos(true);
+            w.set_jeoc(true);
+        });
     }
 
     // ── Current conversion ──────────────────────────────────────────────────
@@ -270,6 +284,8 @@ impl CurrentSampler for CurrentSenseAdc {
 
     fn calibrate(&mut self) {
         const N: u32 = 128;
+        /// Timeout counter limit to prevent deadlock if ADC clock fails
+        const TIMEOUT_LIMIT: u32 = 1_000_000;
 
         // Switch to software trigger by writing JSQR with JEXTEN=disabled.
         let make_sw = |ch: u8| -> u32 {
@@ -289,21 +305,42 @@ impl CurrentSampler for CurrentSenseAdc {
             // Sample Ia: ADC1 ch3
             pac::ADC1.jsqr().write_value(Jsqr(make_sw(CH_IA)));
             pac::ADC1.cr().modify(|w| w.set_jadstart(true));
-            while !pac::ADC1.isr().read().jeos() {}
+            let mut timeout = 0;
+            while !pac::ADC1.isr().read().jeos() {
+                timeout += 1;
+                if timeout > TIMEOUT_LIMIT {
+                    cortex_m::asm::bkpt();
+                    break;
+                }
+            }
             pac::ADC1.isr().write(|w| w.set_jeos(true));
             sum_a += pac::ADC1.jdr(0).read().jdata() as u32;
 
             // Sample Ib: ADC2 ch3
             pac::ADC2.jsqr().write_value(Jsqr(make_sw(CH_IB)));
             pac::ADC2.cr().modify(|w| w.set_jadstart(true));
-            while !pac::ADC2.isr().read().jeos() {}
+            let mut timeout = 0;
+            while !pac::ADC2.isr().read().jeos() {
+                timeout += 1;
+                if timeout > TIMEOUT_LIMIT {
+                    cortex_m::asm::bkpt();
+                    break;
+                }
+            }
             pac::ADC2.isr().write(|w| w.set_jeos(true));
             sum_b += pac::ADC2.jdr(0).read().jdata() as u32;
 
             // Sample Ic: ADC1 ch12
             pac::ADC1.jsqr().write_value(Jsqr(make_sw(CH_IC_ADC1)));
             pac::ADC1.cr().modify(|w| w.set_jadstart(true));
-            while !pac::ADC1.isr().read().jeos() {}
+            let mut timeout = 0;
+            while !pac::ADC1.isr().read().jeos() {
+                timeout += 1;
+                if timeout > TIMEOUT_LIMIT {
+                    cortex_m::asm::bkpt();
+                    break;
+                }
+            }
             pac::ADC1.isr().write(|w| w.set_jeos(true));
             sum_c += pac::ADC1.jdr(0).read().jdata() as u32;
         }
