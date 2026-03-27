@@ -38,7 +38,7 @@ struct Cli {
     port: String,
 
     /// Baud rate
-    #[arg(short, long, default_value = "115200")]
+    #[arg(short, long, default_value = "921600")]
     baud: u32,
 
     #[command(subcommand)]

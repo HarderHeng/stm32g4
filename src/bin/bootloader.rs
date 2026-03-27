@@ -112,9 +112,8 @@ fn jump_to_app(sp: u32, pc: u32) -> ! {
         // Disable interrupts
         cortex_m::interrupt::disable();
 
-        // Set VTOR to APP vector table
-        let scb = 0xE000_ED00 as *mut u32;
-        core::ptr::write_volatile(scb.add(0x08 / 4), APP_START);
+        // Set VTOR to APP vector table using cortex_m peripheral API
+        (*cortex_m::peripheral::SCB::PTR).vtor.write(APP_START);
 
         // Set MSP and jump
         asm!(

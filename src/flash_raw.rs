@@ -39,6 +39,16 @@ mod cr {
 mod sr {
     /// Busy flag
     pub const BSY: u32 = 1 << 16;
+    /// Write protection error (cleared by writing 1)
+    pub const WRPERR: u32 = 1 << 4;
+    /// Programming alignment error (cleared by writing 1)
+    pub const PGAERR: u32 = 1 << 5;
+    /// Size error (cleared by writing 1)
+    pub const SIZERR: u32 = 1 << 6;
+    /// Programming error (cleared by writing 1)
+    pub const PROGERR: u32 = 1 << 7;
+    /// All error flags mask
+    pub const ERR_MASK: u32 = WRPERR | PGAERR | SIZERR | PROGERR;
 }
 
 /// Unlock the Flash controller for write/erase operations.
@@ -60,12 +70,33 @@ pub(crate) fn lock() {
 }
 
 /// Spin until the Flash BSY flag clears.
-pub(crate) fn wait_ready() {
+/// Returns Ok(()) if successful, or an error string if any error flag is set.
+pub(crate) fn wait_ready() -> Result<(), &'static str> {
     unsafe {
         let sr = (FLASH_BASE + off::SR) as *const u32;
         while core::ptr::read_volatile(sr) & sr::BSY != 0 {
             cortex_m::asm::nop();
         }
+        // Check for error flags after operation completes
+        let sr_val = core::ptr::read_volatile(sr);
+        if sr_val & sr::ERR_MASK != 0 {
+            // Clear error flags by writing 1
+            core::ptr::write_volatile(sr as *mut u32, sr_val & sr::ERR_MASK);
+            // Return specific error based on priority
+            if sr_val & sr::WRPERR != 0 {
+                return Err("Flash write protection error");
+            }
+            if sr_val & sr::PGAERR != 0 {
+                return Err("Flash programming alignment error");
+            }
+            if sr_val & sr::SIZERR != 0 {
+                return Err("Flash size error");
+            }
+            if sr_val & sr::PROGERR != 0 {
+                return Err("Flash programming error");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -97,7 +128,8 @@ pub(crate) fn erase_page(page: u8) -> Result<(), &'static str> {
         core::ptr::write_volatile(cr, val);
     }
 
-    wait_ready();
+    // Check for errors after erase
+    wait_ready()?;
 
     unsafe {
         let cr = (FLASH_BASE + off::CR) as *mut u32;
@@ -133,7 +165,7 @@ pub(crate) fn write(address: u32, data: &[u8]) -> Result<(), &'static str> {
         core::ptr::write_volatile(cr, val | cr::PG);
 
         for (i, chunk) in data.chunks(8).enumerate() {
-            wait_ready();
+            let _ = wait_ready();
 
             let dest = (address as usize + i * 8) as *mut u64;
             let mut buf = [0u8; 8];
@@ -141,7 +173,7 @@ pub(crate) fn write(address: u32, data: &[u8]) -> Result<(), &'static str> {
             let word = u64::from_le_bytes(buf);
             core::ptr::write_volatile(dest, word);
 
-            wait_ready();
+            let _ = wait_ready();
         }
 
         // Disable programming mode

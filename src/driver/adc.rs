@@ -320,3 +320,20 @@ impl CurrentSampler for CurrentSenseAdc {
         self.sector = 0;
     }
 }
+
+impl CurrentSenseAdc {
+    /// Get Ia offset (for debugging/logging)
+    pub fn ia_offset(&self) -> u16 {
+        self.ia_offset
+    }
+
+    /// Get Ib offset (for debugging/logging)
+    pub fn ib_offset(&self) -> u16 {
+        self.ib_offset
+    }
+
+    /// Get Ic offset (for debugging/logging)
+    pub fn ic_offset(&self) -> u16 {
+        self.ic_offset
+    }
+}

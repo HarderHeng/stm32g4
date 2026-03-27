@@ -16,6 +16,7 @@ app = ["embassy-stm32", "embassy-sync", "embassy-executor", "embassy-time", "emb
 # Core dependencies (required for both bootloader and app)
 cortex-m = { version = "0.7.6", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7.0"
+libm = "0.2.8"
 
 # APP-only dependencies
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "time-driver-any", "stm32g431cb", "unstable-pac", "exti"], optional = true }

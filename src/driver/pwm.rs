@@ -111,9 +111,10 @@ impl MotorPwm {
         });
         pwm.enable(Channel::Ch4);
 
-        // Initial ADC trigger position: slightly after the PWM valley (centre)
-        // so that the ADC samples when all low-side FETs are conducting.
-        // CCR4 = period/4 places the trigger in the lower quarter of the cycle.
+        // Initial ADC trigger position: at PWM valley (center of period)
+        // where all low-side FETs are conducting for valid current sampling.
+        // CCR4 = period/4 = 1062 places the trigger at 25% of the cycle,
+        // which aligns with the center of the down-count for center-aligned PWM.
         pwm.set_duty(Channel::Ch4, (PWM_PERIOD / 4) as u32);
 
         // Connect COMP1/2/4 outputs to TIM1 BRK (hardware OCP).
@@ -141,6 +142,42 @@ impl MotorPwm {
     pub fn inner_mut(&mut self) -> &mut ComplementaryPwm<'static, embassy_stm32::peripherals::TIM1> {
         &mut self.pwm
     }
+
+    /// Enable TIM1 UPDATE interrupt for FOC control loop.
+    ///
+    /// Call this after PWM initialization to enable hardware-triggered
+    /// 20kHz FOC execution. The interrupt will fire once per full PWM cycle
+    /// (configured via RCR = 1).
+    pub fn enable_update_interrupt(&mut self) {
+        use embassy_stm32::interrupt::{Interrupt, InterruptExt};
+
+        // Enable TIM1 UPDATE interrupt (TIM1_UP_TIM16 on STM32G4)
+        unsafe {
+            let irq = Interrupt::TIM1_UP_TIM16;
+            irq.set_priority(into_priority(0x80));
+            irq.enable();
+        }
+
+        // Enable UPDATE interrupt in TIM1 DIER register
+        pac::TIM1.dier().modify(|w| w.set_uie(true));
+    }
+
+    /// Disable TIM1 UPDATE interrupt.
+    pub fn disable_update_interrupt(&mut self) {
+        use embassy_stm32::interrupt::{Interrupt, InterruptExt};
+
+        // Disable UPDATE interrupt in TIM1 DIER register
+        pac::TIM1.dier().modify(|w| w.set_uie(false));
+
+        // Disable NVIC interrupt
+        let irq = Interrupt::TIM1_UP_TIM16;
+        irq.disable();
+    }
+}
+
+/// Convert raw priority value to Priority type
+fn into_priority(priority: u8) -> embassy_stm32::interrupt::Priority {
+    unsafe { core::mem::transmute(priority) }
 }
 
 impl PwmOutput for MotorPwm {
