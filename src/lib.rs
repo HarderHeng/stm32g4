@@ -4,6 +4,9 @@
 //! - `bsp`: Board-level configuration (clocks, GPIO initialization)
 //! - `driver`: Peripheral drivers (wrappers around Embassy HAL)
 //! - `foc`: FOC motor control implementation
+//! - `hal`: HAL trait definitions for FOC (portable abstraction)
+//! - `stm32g4`: STM32G4 HAL implementation (concrete types)
+//! - `config`: Unified configuration system
 //! - `shared`: Shared functions between Bootloader and APP
 //! - `bootloader`: Bootloader functionality (bootloader feature only)
 
@@ -15,6 +18,17 @@ pub mod shared;
 // Low-level Flash register primitives — compiled unconditionally so both
 // shared (APP-side request_ota) and the bootloader module can use them.
 pub(crate) mod flash_raw;
+
+// New HAL trait layer and STM32G4 implementation
+#[cfg(not(feature = "bootloader"))]
+pub mod hal;
+
+#[cfg(not(feature = "bootloader"))]
+pub mod stm32g4;
+
+// Configuration system
+#[cfg(not(feature = "bootloader"))]
+pub mod config;
 
 // Only compile these modules for APP (not bootloader)
 #[cfg(not(feature = "bootloader"))]

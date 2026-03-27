@@ -32,9 +32,11 @@
 pub mod transforms;
 pub mod pi;
 pub mod svpwm;
-pub mod motor;
+pub mod controller;
 
-pub use motor::{FocController, FocMode, MotorState, RampGenerator};
+// Legacy re-export for backward compatibility
+// New code should use `controller::FocController` instead
+pub use controller::{FocController, FocMode, MotorState, RampGenerator};
 pub use transforms::{clarke_transform, park_transform, inv_park_transform, inv_clarke_transform, ElectricalAngle};
 pub use pi::{PiController, DualCurrentController};
 pub use svpwm::{SvpwmModulator, Sector};
